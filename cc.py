@@ -637,3 +637,350 @@ if __name__ == "__main__":
     finally:
         # Ensure client is closed
         client.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+from flask import Flask, request, jsonify
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import logging
+import time
+import socket
+import threading
+import os
+import signal
+import sys
+import smtplib
+from typing import Dict, Any, List, Optional
+import json
+
+# Configuration
+ENV = "preprod"
+REGION_NM = "us-east-1"
+APPLICATION_CODE = "aedl"
+SERVER_PORT = 8080
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
+CONNECTION_TIMEOUT = 30  # seconds
+MAX_CONNECTIONS = 100  # Maximum concurrent connections
+SMTP_CONFIG = {
+    "server": "smtp.example.com",  # Replace with your SMTP server
+    "port": 587,
+    "user": "your-username",       # Replace with your SMTP username
+    "password": "your-password"    # Replace with your SMTP password
+}
+
+# Configure logging
+os.makedirs("logs", exist_ok=True)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("logs/mcp_server.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("mcp_server")
+
+# Initialize Flask app
+app = Flask(__name__)
+
+# Connection management
+active_connections = 0
+connection_lock = threading.Lock()
+
+# Health metrics
+server_metrics = {
+    "start_time": time.time(),
+    "total_requests": 0,
+    "successful_requests": 0,
+    "failed_requests": 0,
+    "active_connections": 0,
+    "smtp_errors": 0
+}
+metrics_lock = threading.Lock()
+
+def update_metrics(key: str, increment: int = 1):
+    """Update server metrics safely."""
+    with metrics_lock:
+        if key in server_metrics:
+            server_metrics[key] += increment
+
+
+class ConnectionManager:
+    """Context manager for tracking active connections."""
+    
+    def __enter__(self):
+        global active_connections
+        with connection_lock:
+            if active_connections >= MAX_CONNECTIONS:
+                logger.warning(f"Connection limit reached: {active_connections}/{MAX_CONNECTIONS}")
+                raise ConnectionError("Server connection limit reached")
+            active_connections += 1
+            update_metrics("active_connections", 1)
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        global active_connections
+        with connection_lock:
+            active_connections -= 1
+            update_metrics("active_connections", -1)
+
+
+def get_smtp_connection(logger):
+    """
+    Get an SMTP connection with enterprise settings.
+    Simplified version of the get_ser_conn function.
+    """
+    try:
+        # Create SMTP connection
+        smtp = smtplib.SMTP(SMTP_CONFIG["server"], SMTP_CONFIG["port"])
+        
+        # Start TLS for security
+        smtp.starttls()
+        
+        # Authentication
+        smtp.login(SMTP_CONFIG["user"], SMTP_CONFIG["password"])
+        
+        logger.info("SMTP connection established successfully")
+        return smtp
+    
+    except Exception as e:
+        logger.error(f"Failed to establish SMTP connection: {e}")
+        raise
+
+
+def send_test_email(subject: str, body: str, receivers: str) -> Dict[str, Any]:
+    """
+    Send HTML email with improved error handling and connection management.
+    
+    Args:
+        subject: Email subject
+        body: HTML email body
+        receivers: Comma-separated list of recipient email addresses
+        
+    Returns:
+        Status message indicating success or failure with details
+    """
+    update_metrics("total_requests")
+    request_id = f"req-{int(time.time() * 1000)}"
+    logger.info(f"[{request_id}] Email request received")
+    
+    try:
+        with ConnectionManager():
+            # Parse recipients
+            try:
+                recipients = [email.strip() for email in receivers.split(",") if email.strip()]
+                if not recipients:
+                    logger.error(f"[{request_id}] No valid recipients provided")
+                    update_metrics("failed_requests")
+                    return {"status": "error", "message": "No valid recipients provided"}
+            except Exception as e:
+                logger.error(f"[{request_id}] Failed to parse recipients: {e}")
+                update_metrics("failed_requests")
+                return {"status": "error", "message": f"Failed to parse recipients: {e}"}
+            
+            # Set up email message
+            try:
+                sender = 'noreply-vkhvkm'
+                
+                msg = MIMEMultipart()
+                msg['Subject'] = subject
+                msg['From'] = sender
+                msg['To'] = ', '.join(recipients)
+                msg.attach(MIMEText(body, 'html'))
+                
+                message_string = msg.as_string()
+            except Exception as e:
+                logger.error(f"[{request_id}] Failed to create email message: {e}")
+                update_metrics("failed_requests")
+                return {"status": "error", "message": f"Failed to create email message: {e}"}
+            
+            # Send email with retry logic
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    logger.info(f"[{request_id}] Connecting to SMTP server (attempt {attempt}/{MAX_RETRIES})...")
+                    
+                    # Set connection timeout
+                    socket.setdefaulttimeout(CONNECTION_TIMEOUT)
+                    
+                    # Get connection with detailed logging
+                    smtpObj = get_smtp_connection(logger)
+                    
+                    # Log connection success
+                    logger.info(f"[{request_id}] SMTP connection established successfully")
+                    
+                    # Send email
+                    smtpObj.sendmail(sender, recipients, message_string)
+                    
+                    # Close connection properly
+                    try:
+                        smtpObj.quit()
+                    except Exception as close_err:
+                        logger.warning(f"[{request_id}] Non-critical error during SMTP disconnect: {close_err}")
+                    
+                    logger.info(f"[{request_id}] Email sent successfully")
+                    update_metrics("successful_requests")
+                    return {"status": "success", "message": "Email sent successfully", "request_id": request_id}
+                    
+                except (socket.timeout, ConnectionRefusedError) as conn_err:
+                    logger.error(f"[{request_id}] Connection error (attempt {attempt}/{MAX_RETRIES}): {conn_err}")
+                    if attempt < MAX_RETRIES:
+                        logger.info(f"[{request_id}] Retrying in {RETRY_DELAY} seconds...")
+                        time.sleep(RETRY_DELAY)
+                    else:
+                        update_metrics("failed_requests")
+                        update_metrics("smtp_errors")
+                        return {
+                            "status": "error", 
+                            "message": f"Connection error after {MAX_RETRIES} attempts: {conn_err}",
+                            "request_id": request_id
+                        }
+                        
+                except Exception as e:
+                    logger.error(f"[{request_id}] Error sending email (attempt {attempt}/{MAX_RETRIES}): {e}")
+                    if attempt < MAX_RETRIES:
+                        logger.info(f"[{request_id}] Retrying in {RETRY_DELAY} seconds...")
+                        time.sleep(RETRY_DELAY)
+                    else:
+                        update_metrics("failed_requests")
+                        update_metrics("smtp_errors")
+                        return {
+                            "status": "error", 
+                            "message": f"Error sending email after {MAX_RETRIES} attempts: {e}",
+                            "request_id": request_id
+                        }
+    
+    except ConnectionError as e:
+        logger.error(f"[{request_id}] Server connection limit reached: {e}")
+        update_metrics("failed_requests")
+        return {"status": "error", "message": str(e), "request_id": request_id}
+        
+    except Exception as e:
+        logger.error(f"[{request_id}] Unexpected error: {e}")
+        update_metrics("failed_requests")
+        return {"status": "error", "message": f"Unexpected error: {e}", "request_id": request_id}
+
+
+def health_check() -> Dict[str, Any]:
+    """
+    Performs basic health check of the server and its dependencies.
+    
+    Returns:
+        Status message with server health information
+    """
+    request_id = f"health-{int(time.time() * 1000)}"
+    logger.info(f"[{request_id}] Health check requested")
+    
+    # Calculate uptime
+    uptime = time.time() - server_metrics["start_time"]
+    
+    # Check SMTP connectivity
+    smtp_status = "unknown"
+    smtp_error = None
+    
+    try:
+        socket.setdefaulttimeout(10)
+        smtpObj = get_smtp_connection(logger)
+        smtpObj.noop()  # NOOP command to test connection
+        smtpObj.quit()
+        smtp_status = "connected"
+    except Exception as e:
+        smtp_status = "disconnected"
+        smtp_error = str(e)
+        logger.error(f"[{request_id}] SMTP health check failed: {e}")
+    
+    # Get current metrics
+    with metrics_lock:
+        current_metrics = server_metrics.copy()
+    
+    # Return server status
+    health_data = {
+        "status": "healthy" if smtp_status == "connected" else "degraded",
+        "environment": ENV,
+        "region": REGION_NM,
+        "timestamp": time.time(),
+        "uptime_seconds": uptime,
+        "smtp_status": smtp_status,
+        "metrics": current_metrics
+    }
+    
+    if smtp_error:
+        health_data["smtp_error"] = smtp_error
+    
+    logger.info(f"[{request_id}] Health check completed: {health_data['status']}")
+    return health_data
+
+
+# Register API routes with Flask
+@app.route('/send_test_email', methods=['POST'])
+def api_send_test_email():
+    """API endpoint for send_test_email function."""
+    try:
+        data = request.json
+        subject = data.get('subject', '')
+        body = data.get('body', '')
+        receivers = data.get('receivers', '')
+        
+        result = send_test_email(subject, body, receivers)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"API error in send_test_email: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/health_check', methods=['GET'])
+def api_health_check():
+    """API endpoint for health_check function."""
+    try:
+        result = health_check()
+        status_code = 200 if result["status"] == "healthy" else 503
+        return jsonify(result), status_code
+    except Exception as e:
+        logger.error(f"API error in health_check: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# Graceful shutdown handler
+def shutdown_server(signum, frame):
+    """Handle graceful server shutdown."""
+    logger.info(f"Received signal {signum}, shutting down...")
+    # Perform cleanup
+    logger.info("Server shutdown complete")
+    sys.exit(0)
+
+
+# Register signal handlers
+signal.signal(signal.SIGTERM, shutdown_server)
+signal.signal(signal.SIGINT, shutdown_server)
+
+
+if __name__ == "__main__":
+    logger.info(f"Starting MCP server on port {SERVER_PORT}")
+    
+    # Try to use Waitress if available
+    try:
+        from waitress import serve
+        logger.info("Using Waitress WSGI server")
+        serve(app, host="0.0.0.0", port=SERVER_PORT, threads=20)
+    except ImportError:
+        # Fall back to Flask's built-in server
+        logger.warning("Waitress not found, using Flask's development server (not recommended for production)")
+        app.run(host="0.0.0.0", port=SERVER_PORT, threaded=True)
