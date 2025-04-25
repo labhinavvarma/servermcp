@@ -1,59 +1,68 @@
-# === SERVER: server_app.py ===
+# === CLIENT: client_app.py ===
+# Connects to the MCP Email Server via SSE and invokes send_test_email
 
-from mcp.server.fastmcp import FastMCP
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from loguru import logger
-from ReduceReuseRecycleGENAI import get_ser_conn
+import aiohttp
+import asyncio
+import json
 
-# Initialize MCP server
-env = "preprod"
-region_nm = "us-east-1"
+class SimpleSSEAgent:
+    def __init__(self, server_url: str):
+        # Base URL for MCP SSE endpoint, e.g., http://<EC2-IP>:8000/sse
+        self.server_url = server_url.rstrip('/')
+        self.session = aiohttp.ClientSession()
 
-mcp = FastMCP("email-server")
+    async def connect(self):
+        print(f"✅ Connected to MCP server at {self.server_url}")
 
-@mcp.tool(name="send_test_email", description="Send a basic HTML email via enterprise SMTP.")
-def send_test_email(subject: str, body: str, receivers: str) -> str:
-    """
-    Sends an HTML email.
-    Args:
-        subject: Email subject
-        body: HTML body of the email
-        receivers: Comma-separated recipient emails
-    Returns:
-        Status message
-    """
-    try:
-        sender = 'noreply-arb-info@elevancehealth.com'
-        recipients = [email.strip() for email in receivers.split(',')]
+    async def send_email(self, subject: str, body: str, receivers: str):
+        """
+        Invoke the send_test_email tool on the MCP server via SSE.
+        """
+        url = f"{self.server_url}/send_test_email"
+        headers = {
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "subject": subject,
+            "body": body,
+            "receivers": receivers
+        }
 
-        msg = MIMEMultipart()
-        msg['Subject'] = subject
-        msg['From'] = sender
-        msg['To'] = ', '.join(recipients)
-        msg.attach(MIMEText(body, 'html'))
+        print(f"🚀 Sending email request to: {url}")
+        async with self.session.post(url, json=payload, headers=headers) as resp:
+            if resp.status != 200:
+                print(f"❌ Request failed with HTTP status {resp.status}")
+                text = await resp.text()
+                print(f"Response: {text}")
+                return
 
-        smtp_obj = get_ser_conn(
-            logger,
-            env=env,
-            region_name=region_nm,
-            aplctn_cd="aedl",
-            port=None,
-            tls=True,
-            debug=False
-        )
-        smtp_obj.sendmail(sender, recipients, msg.as_string())
-        smtp_obj.quit()
+            # Stream SSE events
+            async for line in resp.content:
+                # SSE lines start with 'data: '
+                if line.startswith(b"data: "):
+                    data = line[len(b"data: "):].decode('utf-8').strip()
+                    if data == '[DONE]':
+                        print("✅ Email tool invocation completed.")
+                        break
+                    print(f"📨 {data}")
 
-        logger.info("Email sent successfully.")
-        return "Email sent successfully."
-    except Exception as e:
-        error = f"Error sending email: {e}"
-        logger.error(error)
-        return error
+    async def close(self):
+        await self.session.close()
 
-# Start the MCP Email Server using SSE transport
-if __name__ == "__main__":
-    print("🚀 MCP Email Server is running in SSE mode and waiting for client invocations...", flush=True)
-    mcp.run(transport="sse")
+async def main():
+    # Replace <EC2_IP> with your server's address
+    server_base = "http://10.126.192.183:8000/sse"
+    agent = SimpleSSEAgent(server_base)
+    await agent.connect()
+
+    # Example email parameters
+    subject = "Test Email via SSE Client"
+    body = "<p>Hello from MCP SSE client!</p>"
+    receivers = "gentela.vnsaipavan@carelon.com"
+
+    await agent.send_email(subject, body, receivers)
+    await agent.close()
+
+if __name__ == '__main__':
+    asyncio.run(main())
