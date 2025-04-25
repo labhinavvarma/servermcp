@@ -1,11 +1,11 @@
 # === SERVER: server_app.py ===
 """
 A simple HTTP server using FastAPI to send emails with enterprise SMTP connection.
+Run via: python server_app.py
 """
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from loguru import logger
-import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from ReduceReuseRecycleGENAI import get_ser_conn
@@ -52,8 +52,10 @@ def send_test_email(req: EmailRequest):
         logger.error(f"Error sending email: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# To run the server:
-# uvicorn server_app:app --host 0.0.0.0 --port 8000
+if __name__ == "__main__":
+    import uvicorn
+    print("🚀 Starting Email Server on http://0.0.0.0:8000 ...", flush=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
 
 # === CLIENT: client_app.py ===
