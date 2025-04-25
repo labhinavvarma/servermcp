@@ -1,68 +1,86 @@
+# === SERVER: server_app.py ===
+"""
+A simple HTTP server using FastAPI to send emails with enterprise SMTP connection.
+"""
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from loguru import logger
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from ReduceReuseRecycleGENAI import get_ser_conn
+
+app = FastAPI()
+
+env = "preprod"
+region_nm = "us-east-1"
+
+class EmailRequest(BaseModel):
+    subject: str
+    body: str
+    receivers: str  # comma-separated emails
+
+@app.post("/send_test_email")
+def send_test_email(req: EmailRequest):
+    try:
+        sender = 'noreply-arb-info@elevancehealth.com'
+        recipients = [email.strip() for email in req.receivers.split(",")]
+
+        # Compose message
+        msg = MIMEMultipart()
+        msg['Subject'] = req.subject
+        msg['From'] = sender
+        msg['To'] = ', '.join(recipients)
+        msg.attach(MIMEText(req.body, 'html'))
+
+        # Send via enterprise SMTP
+        smtp_obj = get_ser_conn(
+            logger,
+            env=env,
+            region_name=region_nm,
+            aplctn_cd="aedl",
+            port=None,
+            tls=True,
+            debug=False
+        )
+        smtp_obj.sendmail(sender, recipients, msg.as_string())
+        smtp_obj.quit()
+
+        logger.info("Email sent successfully.")
+        return {"status": "success", "message": "Email sent successfully."}
+    except Exception as e:
+        logger.error(f"Error sending email: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# To run the server:
+# uvicorn server_app:app --host 0.0.0.0 --port 8000
+
+
 # === CLIENT: client_app.py ===
-# Connects to the MCP Email Server via SSE and invokes send_test_email
+"""
+A simple HTTP client to invoke the email sending server.
+"""
+import requests
 
-import aiohttp
-import asyncio
-import json
+SERVER_URL = "http://10.126.192.183:8000/send_test_email"  # Replace with your EC2 IP
 
-class SimpleSSEAgent:
-    def __init__(self, server_url: str):
-        # Base URL for MCP SSE endpoint, e.g., http://<EC2-IP>:8000/sse
-        self.server_url = server_url.rstrip('/')
-        self.session = aiohttp.ClientSession()
+payload = {
+    "subject": "Test Email",
+    "body": "<p>Hello from FastAPI client!</p>",
+    "receivers": "gentela.vnsaipavan@carelon.com"
+}
 
-    async def connect(self):
-        print(f"✅ Connected to MCP server at {self.server_url}")
+headers = {
+    "Content-Type": "application/json"
+}
 
-    async def send_email(self, subject: str, body: str, receivers: str):
-        """
-        Invoke the send_test_email tool on the MCP server via SSE.
-        """
-        url = f"{self.server_url}/send_test_email"
-        headers = {
-            "Accept": "text/event-stream",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "subject": subject,
-            "body": body,
-            "receivers": receivers
-        }
+def send_email():
+    try:
+        resp = requests.post(SERVER_URL, json=payload, headers=headers)
+        print(f"Status: {resp.status_code}")
+        print(f"Response: {resp.json()}")
+    except Exception as e:
+        print(f"Request failed: {e}")
 
-        print(f"🚀 Sending email request to: {url}")
-        async with self.session.post(url, json=payload, headers=headers) as resp:
-            if resp.status != 200:
-                print(f"❌ Request failed with HTTP status {resp.status}")
-                text = await resp.text()
-                print(f"Response: {text}")
-                return
-
-            # Stream SSE events
-            async for line in resp.content:
-                # SSE lines start with 'data: '
-                if line.startswith(b"data: "):
-                    data = line[len(b"data: "):].decode('utf-8').strip()
-                    if data == '[DONE]':
-                        print("✅ Email tool invocation completed.")
-                        break
-                    print(f"📨 {data}")
-
-    async def close(self):
-        await self.session.close()
-
-async def main():
-    # Replace <EC2_IP> with your server's address
-    server_base = "http://10.126.192.183:8000/sse"
-    agent = SimpleSSEAgent(server_base)
-    await agent.connect()
-
-    # Example email parameters
-    subject = "Test Email via SSE Client"
-    body = "<p>Hello from MCP SSE client!</p>"
-    receivers = "gentela.vnsaipavan@carelon.com"
-
-    await agent.send_email(subject, body, receivers)
-    await agent.close()
-
-if __name__ == '__main__':
-    asyncio.run(main())
+if __name__ == "__main__":
+    send_email()
