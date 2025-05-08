@@ -3,7 +3,6 @@ import json
 import uuid
 import urllib3
 
-# Disable insecure request warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # === Cortex API Endpoint ===
@@ -15,7 +14,7 @@ app_id = "edadip"
 aplctn_cd = "edagnai"
 model = "llama3.1-70b"
 sys_msg = "You are powerful AI assistant in providing accurate answers always. Be Concise in providing answers based on context."
-session_id = str(uuid.uuid4())  # Optional: Generate unique session ID
+session_id = str(uuid.uuid4())
 
 # === HTTP Headers ===
 headers = {
@@ -24,7 +23,7 @@ headers = {
     "Authorization": f'Snowflake Token="{api_key}"'
 }
 
-# === Chatbot Loop ===
+# === Chatbot Interface ===
 print("🤖 Snowflake Cortex Chatbot Ready!")
 print("Type 'exit' to quit.\n")
 
@@ -34,7 +33,7 @@ while True:
         print("👋 Chat ended.")
         break
 
-    # === Request Body Structure ===
+    # === Cortex Request Payload ===
     payload = {
         "query": {
             "aplctn_cd": aplctn_cd,
@@ -60,19 +59,18 @@ while True:
 
     try:
         response = requests.post(url, headers=headers, json=payload, verify=False)
-        print(f"✅ Status Code: {response.status_code}")
 
         if response.status_code == 200:
-            try:
-                data = response.json()
-                print(f"🤖 Bot: {data.get('text', 'No response received')}\n")
-            except json.JSONDecodeError:
-                print("⚠️ Response is not valid JSON. Raw response:")
-                print(response.text, "\n")
+            raw_text = response.text
+            if "end_of_stream" in raw_text:
+                answer, _, _ = raw_text.partition("end_of_stream")
+                print(f"🤖 Bot: {answer.strip()}\n")
+            else:
+                print(f"🤖 Bot: {raw_text.strip()}\n")
         else:
-            print("⚠️ Error Response:")
+            print(f"❌ Error {response.status_code}:")
             try:
-                print(json.dumps(response.json(), indent=2), "\n")
+                print(json.dumps(response.json(), indent=2))
             except:
                 print(response.text)
 
