@@ -1,3 +1,4 @@
+import streamlit as st
 import requests
 import json
 import uuid
@@ -5,43 +6,38 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# === Cortex API Endpoint ===
-url = "https://sfassist.edagenaidev.awsdns.internal.das/api/cortex/complete"
+# === Configuration ===
+API_URL = "https://sfassist.edagenaidev.awsdns.internal.das/api/cortex/complete"
+API_KEY = "78a799ea-a0f6-11ef-a0ce-15a449f7a8b0"
+APP_ID = "edadip"
+APLCTN_CD = "edagnai"
+MODEL = "llama3.1-70b"
+SYS_MSG = "You are powerful AI assistant in providing accurate answers always. Be Concise in providing answers based on context."
 
-# === Static Configuration ===
-api_key = "78a799ea-a0f6-11ef-a0ce-15a449f7a8b0"
-app_id = "edadip"
-aplctn_cd = "edagnai"
-model = "llama3.1-70b"
-sys_msg = "You are powerful AI assistant in providing accurate answers always. Be Concise in providing answers based on context."
-session_id = str(uuid.uuid4())
+# === Session State ===
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-# === HTTP Headers ===
-headers = {
-    "Content-Type": "application/json; charset=utf-8",
-    "Accept": "application/json",
-    "Authorization": f'Snowflake Token="{api_key}"'
-}
+# === Streamlit Page Config ===
+st.set_page_config(page_title="Cortex Chatbot", page_icon="🤖", layout="centered")
+st.title("🤖 Snowflake Cortex Chatbot")
 
-# === Chatbot Interface ===
-print("🤖 Snowflake Cortex Chatbot Ready!")
-print("Type 'exit' to quit.\n")
+# === User Input ===
+user_input = st.text_input("Ask me anything:", placeholder="e.g. Who is the president of the USA?", key="input")
 
-while True:
-    user_input = input("You: ").strip()
-    if user_input.lower() in ["exit", "quit"]:
-        print("👋 Chat ended.")
-        break
+# === Send to Cortex on submit ===
+if user_input:
+    session_id = str(uuid.uuid4())  # Optional: new session per question
 
-    # === Cortex Request Payload ===
+    # === Construct Payload ===
     payload = {
         "query": {
-            "aplctn_cd": aplctn_cd,
-            "app_id": app_id,
-            "api_key": api_key,
+            "aplctn_cd": APLCTN_CD,
+            "app_id": APP_ID,
+            "api_key": API_KEY,
             "method": "cortex",
-            "model": model,
-            "sys_msg": sys_msg,
+            "model": MODEL,
+            "sys_msg": SYS_MSG,
             "limit_convs": "0",
             "prompt": {
                 "messages": [
@@ -57,22 +53,37 @@ while True:
         }
     }
 
-    try:
-        response = requests.post(url, headers=headers, json=payload, verify=False)
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept": "application/json",
+        "Authorization": f'Snowflake Token="{API_KEY}"'
+    }
 
+    try:
+        response = requests.post(API_URL, headers=headers, json=payload, verify=False)
         if response.status_code == 200:
-            raw_text = response.text
-            if "end_of_stream" in raw_text:
-                answer, _, _ = raw_text.partition("end_of_stream")
-                print(f"🤖 Bot: {answer.strip()}\n")
+            raw = response.text
+            if "end_of_stream" in raw:
+                answer, _, _ = raw.partition("end_of_stream")
+                bot_reply = answer.strip()
             else:
-                print(f"🤖 Bot: {raw_text.strip()}\n")
+                bot_reply = raw.strip()
+
+            st.session_state.messages.append(("user", user_input))
+            st.session_state.messages.append(("bot", bot_reply))
+
+            # Clear input field
+            st.session_state.input = ""
+
         else:
-            print(f"❌ Error {response.status_code}:")
-            try:
-                print(json.dumps(response.json(), indent=2))
-            except:
-                print(response.text)
+            st.error(f"Error {response.status_code}: {response.text}")
 
     except Exception as e:
-        print("❌ Request Failed:", str(e), "\n")
+        st.error(f"❌ Request failed: {str(e)}")
+
+# === Display Chat History ===
+for role, message in reversed(st.session_state.messages):
+    if role == "user":
+        st.markdown(f"**🧑 You:** {message}")
+    else:
+        st.markdown(f"**🤖 Bot:** {message}")
