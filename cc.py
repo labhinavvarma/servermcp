@@ -95,6 +95,17 @@ with st.sidebar.expander("📦 Resources"):
 with st.sidebar.expander("🛠 Tools"):
     for t in st.session_state.mcp_info["tools"]:
         st.markdown(f"**{t['name']}**\n\n{t['description']}")
+        if st.sidebar.button(f"▶️ Run {t['name']}", key=t['name']):
+            async def run_tool():
+                try:
+                    async with sse_client(server_url) as sse_connection:
+                        async with ClientSession(*sse_connection) as session:
+                            await session.initialize()
+                            result = await session.call_tool(t['name'], {})
+                            st.session_state.messages.append({"role": "assistant", "content": f"🛠️ Tool `{t['name']}` executed:\n\n{result.content[0].text}"})
+                except Exception as e:
+                    st.session_state.messages.append({"role": "assistant", "content": f"❌ Tool `{t['name']}` error: {e}"})
+            asyncio.run(run_tool())
 
 with st.sidebar.expander("🧠 Prompts"):
     for p in st.session_state.mcp_info["prompts"]:
@@ -175,9 +186,11 @@ def call_cortex_llm(text, context_window):
 # === Analyze Tool Request ===
 async def call_analyze_tool(data):
     try:
-        async with MultiServerMCPClient({"DataFlyWheelServer": {"url": server_url, "transport": "sse"}}) as client:
-            result = await client.call_tool("analyze", {"json": data})
-            return result.content[0].text
+        async with sse_client(server_url) as sse_connection:
+            async with ClientSession(*sse_connection) as session:
+                await session.initialize()
+                result = await session.call_tool("analyze", {"json": data})
+                return result.content[0].text
     except Exception as e:
         return f"❌ MCP Analyze Tool Error: {e}"
 
