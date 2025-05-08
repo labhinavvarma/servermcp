@@ -4,6 +4,7 @@ import json
 import uuid
 import urllib3
 
+# Disable SSL warnings (only do this in internal/dev environments)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # === Configuration ===
@@ -12,23 +13,28 @@ API_KEY = "78a799ea-a0f6-11ef-a0ce-15a449f7a8b0"
 APP_ID = "edadip"
 APLCTN_CD = "edagnai"
 MODEL = "llama3.1-70b"
-SYS_MSG = "You are powerful AI assistant in providing accurate answers always. Be Concise in providing answers based on context."
+SYS_MSG = (
+    "You are a powerful AI assistant. Provide accurate, concise answers based on context."
+)
 
-# === Streamlit Page Config ===
-st.set_page_config(page_title="Cortex Chatbot", page_icon="🤖", layout="centered")
+# === Page Setup ===
+st.set_page_config(page_title="Cortex Chatbot", page_icon="🤖")
 st.title("🤖 Snowflake Cortex Chatbot")
 
-# === Session State ===
+# === Session State Setup ===
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# === Input Widget ===
-user_input = st.text_input("Ask something:", key="chat_input", placeholder="e.g. Who is the president of the USA?")
+# === Chat Input Form ===
+with st.form("chat_form", clear_on_submit=True):
+    user_query = st.text_input("Ask a question", key="chat_input", placeholder="e.g. What is 5 + 7?")
+    submitted = st.form_submit_button("Send")
 
-# === Send Query on Submit ===
-if user_input:
-    session_id = str(uuid.uuid4())
+# === When Form Submitted ===
+if submitted and user_query:
+    session_id = str(uuid.uuid4())  # Unique session ID per message
 
+    # === Build Payload ===
     payload = {
         "query": {
             "aplctn_cd": APLCTN_CD,
@@ -42,7 +48,7 @@ if user_input:
                 "messages": [
                     {
                         "role": "user",
-                        "content": user_input
+                        "content": user_query
                     }
                 ]
             },
@@ -60,19 +66,19 @@ if user_input:
 
     try:
         response = requests.post(API_URL, headers=headers, json=payload, verify=False)
+
         if response.status_code == 200:
             raw = response.text
+
             if "end_of_stream" in raw:
                 answer, _, _ = raw.partition("end_of_stream")
                 bot_reply = answer.strip()
             else:
                 bot_reply = raw.strip()
 
-            st.session_state.messages.append(("user", user_input))
+            # Save messages to history
+            st.session_state.messages.append(("user", user_query))
             st.session_state.messages.append(("bot", bot_reply))
-
-            # Clear input via rerun
-            st.experimental_rerun()
 
         else:
             st.error(f"❌ Error {response.status_code}: {response.text}")
@@ -80,9 +86,10 @@ if user_input:
     except Exception as e:
         st.error(f"❌ Request failed: {str(e)}")
 
-# === Chat History ===
+# === Display Chat History ===
+st.divider()
 for role, message in reversed(st.session_state.messages):
     if role == "user":
-        st.markdown(f"**🧑 You:** {message}")
+        st.markdown(f"🧑 **You:** {message}")
     else:
-        st.markdown(f"**🤖 Bot:** {message}")
+        st.markdown(f"🤖 **Bot:** {message}")
