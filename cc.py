@@ -29,51 +29,82 @@ if "context_window" not in st.session_state:
     st.session_state.context_window = []
 if "yaml_models" not in st.session_state:
     st.session_state.yaml_models = {}
+if "mcp_info" not in st.session_state:
+    st.session_state.mcp_info = {"resources": [], "tools": [], "prompts": [], "yaml": []}
 
 # === MCP Server URL ===
 server_url = st.sidebar.text_input("MCP Server URL", "http://localhost:8000/sse")
 
-# === YAML Model Viewer ===
-async def load_yaml_models():
-    models = {}
+# === MCP Metadata Fetch ===
+async def fetch_mcp_info():
+    result = {"resources": [], "tools": [], "prompts": [], "yaml": []}
     try:
-        async with sse_client(server_url) as sse:
-            async with ClientSession(*sse) as session:
+        async with sse_client(server_url) as sse_connection:
+            async with ClientSession(*sse_connection) as session:
                 await session.initialize()
-                yaml_content = await session.read_resource("schematiclayer://cortex_analyst/schematic_models/hedis_stage_full/list")
-                if hasattr(yaml_content, 'contents'):
-                    for item in yaml_content.contents:
-                        if hasattr(item, 'text'):
-                            parsed = yaml.safe_load(item.text)
-                            models[item.name] = yaml.dump(parsed, sort_keys=False)
+                resources = await session.list_resources()
+                if hasattr(resources, 'resources'):
+                    for r in resources.resources:
+                        result["resources"].append({"name": r.name, "description": r.description})
+                tools = await session.list_tools()
+                if hasattr(tools, 'tools'):
+                    for t in tools.tools:
+                        result["tools"].append({"name": t.name, "description": getattr(t, 'description', 'No description')})
+                prompts = await session.list_prompts()
+                if hasattr(prompts, 'prompts'):
+                    for p in prompts.prompts:
+                        args = [f"{arg.name} ({'Required' if arg.required else 'Optional'}): {arg.description}"
+                                for arg in getattr(p, 'arguments', [])]
+                        result["prompts"].append({
+                            "name": p.name,
+                            "description": getattr(p, 'description', ''),
+                            "args": args
+                        })
+                try:
+                    yaml_content = await session.read_resource("schematiclayer://cortex_analyst/schematic_models/hedis_stage_full/list")
+                    if hasattr(yaml_content, 'contents'):
+                        for item in yaml_content.contents:
+                            if hasattr(item, 'text'):
+                                parsed = yaml.safe_load(item.text)
+                                result["yaml"].append({"name": item.name, "content": yaml.dump(parsed, sort_keys=False)})
+                except Exception as e:
+                    result["yaml"].append({"name": "YAML Load Error", "content": str(e)})
     except Exception as e:
-        st.sidebar.error(f"YAML load error: {e}")
-    return models
+        st.sidebar.error(f"❌ MCP Error: {e}")
+    return result
 
-if st.sidebar.button("🔄 Load YAML Models"):
-    st.session_state.yaml_models = asyncio.run(load_yaml_models())
+if st.sidebar.button("🔍 Load MCP Info"):
+    st.session_state.mcp_info = asyncio.run(fetch_mcp_info())
 
-if st.session_state.yaml_models:
-    selected_yaml = st.sidebar.selectbox("📄 Select YAML Model", list(st.session_state.yaml_models.keys()))
-    if selected_yaml:
-        st.sidebar.code(st.session_state.yaml_models[selected_yaml], language="yaml")
+# === MCP Info Display ===
+with st.sidebar.expander("📦 Resources"):
+    for r in st.session_state.mcp_info["resources"]:
+        st.markdown(f"**{r['name']}**\n\n{r['description']}")
 
-# === Upload JSON ===
-uploaded_file = st.sidebar.file_uploader("📂 Upload JSON for Analyze Tool", type=["json"])
-if uploaded_file:
-    try:
-        uploaded_json = json.load(uploaded_file)
-        st.sidebar.success("JSON loaded successfully!")
-    except:
-        st.sidebar.error("Invalid JSON file")
+with st.sidebar.expander("🛠 Tools"):
+    for t in st.session_state.mcp_info["tools"]:
+        st.markdown(f"**{t['name']}**\n\n{t['description']}")
 
-# === Display Chat History ===
+with st.sidebar.expander("🧠 Prompts"):
+    for p in st.session_state.mcp_info["prompts"]:
+        st.markdown(f"**{p['name']}**\n\n{p['description']}")
+        if p["args"]:
+            st.markdown("Arguments:")
+            for a in p["args"]:
+                st.markdown(f"- {a}")
+
+with st.sidebar.expander("📄 YAML Models"):
+    for y in st.session_state.mcp_info["yaml"]:
+        st.markdown(f"**{y['name']}**")
+        st.code(y['content'], language="yaml")
+
+# === Chat Display ===
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 # === Chat Input ===
-query = st.chat_input("Type your question...")
+query = st.chat_input("Ask something or describe your task")
 
 # === Prompt Type Detection ===
 def detect_prompt_type(text):
@@ -85,7 +116,7 @@ def detect_prompt_type(text):
         return "calculator-prompt"
     return "general-prompt"
 
-# === Call Cortex LLM ===
+# === Cortex LLM Request ===
 def call_cortex_llm(text, context_window):
     session_id = str(uuid.uuid4())
     history = "\n".join(context_window[-5:])
@@ -130,34 +161,19 @@ def call_cortex_llm(text, context_window):
     except Exception as e:
         return f"❌ Cortex Exception: {str(e)}"
 
-# === Call MCP Analyze Tool ===
-async def call_analyze_tool(data):
-    try:
-        async with MultiServerMCPClient({"DataFlyWheelServer": {"url": server_url, "transport": "sse"}}) as client:
-            result = await client.call_tool("analyze", {"json": data})
-            return result.content[0].text, "analyze"
-    except Exception as e:
-        return f"❌ MCP Error: {e}", "analyze"
-
-# === Process Query ===
-if query or uploaded_file:
-    st.session_state.messages.append({"role": "user", "content": query if query else "Uploaded JSON analysis"})
-
+# === Handle Query Submission ===
+if query:
+    st.session_state.messages.append({"role": "user", "content": query})
     with st.chat_message("assistant"):
         placeholder = st.empty()
-        placeholder.markdown("Processing...")
+        placeholder.markdown("Thinking...")
 
-        if uploaded_file:
-            tool_result, tool_used = asyncio.run(call_analyze_tool(uploaded_json))
-            final_output = f"{tool_result}\n\n🛠️ Tool used: `{tool_used}`"
-        else:
-            prompt_type = detect_prompt_type(query)
-            response = call_cortex_llm(query, st.session_state.context_window)
-            final_output = response
-            st.session_state.context_window.append(f"User: {query}\nBot: {response}")
+        prompt_type = detect_prompt_type(query)
+        response = call_cortex_llm(query, st.session_state.context_window)
+        placeholder.markdown(response)
 
-        placeholder.markdown(final_output)
-        st.session_state.messages.append({"role": "assistant", "content": final_output})
+        st.session_state.context_window.append(f"User: {query}\nBot: {response}")
+        st.session_state.messages.append({"role": "assistant", "content": response})
 
 # === Clear Chat Button ===
 if st.sidebar.button("🧹 Clear Chat"):
