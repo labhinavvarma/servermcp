@@ -12,8 +12,37 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 
 # === Initial Setup ===
 nest_asyncio.apply()
-st.set_page_config(page_title="Cortex + MCP Chat", page_icon="🤖")
-st.title("🤖 Cortex + MCP Chatbot")
+st.set_page_config(
+    page_title="Cortex + MCP Chat", 
+    page_icon="🤖",
+    layout="wide"
+)
+
+# === Styling ===
+st.markdown("""
+<style>
+    .main-title {
+        text-align: center;
+        color: #4B61D1;
+        margin-bottom: 20px;
+    }
+    .tool-title {
+        color: #4B61D1;
+        font-weight: bold;
+    }
+    .tool-description {
+        margin-bottom: 15px;
+    }
+    .sidebar-section {
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 10px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# === Page Header ===
+st.markdown("<h1 class='main-title'>🤖 Cortex + MCP Chatbot</h1>", unsafe_allow_html=True)
 
 # === Cortex LLM Config ===
 API_URL = "https://sfassist.edagenaidev.awsdns.internal.das/api/cortex/complete"
@@ -34,12 +63,18 @@ if "mcp_info" not in st.session_state:
     st.session_state.mcp_info = {"resources": [], "tools": [], "prompts": [], "yaml": []}
 if "uploaded_json" not in st.session_state:
     st.session_state.uploaded_json = None
+if "tool_args" not in st.session_state:
+    st.session_state.tool_args = {}
 
 # === MCP Server URL ===
 server_url = st.sidebar.text_input("MCP Server URL", "http://localhost:8000/sse")
 
+# === Sidebar Layout ===
+st.sidebar.markdown("## 🔧 Tools & Resources")
+
 # === JSON File Upload ===
-uploaded_file = st.sidebar.file_uploader("📂 Upload JSON for Analyze Tool", type=["json"])
+st.sidebar.markdown("### 📂 Upload Data")
+uploaded_file = st.sidebar.file_uploader("Upload JSON for Analyze Tool", type=["json"])
 if uploaded_file:
     try:
         st.session_state.uploaded_json = json.load(uploaded_file)
@@ -54,86 +89,199 @@ async def fetch_mcp_info():
         async with sse_client(server_url) as sse_connection:
             async with ClientSession(*sse_connection) as session:
                 await session.initialize()
+                # Fetch Resources
                 resources = await session.list_resources()
                 if hasattr(resources, 'resources'):
                     for r in resources.resources:
-                        result["resources"].append({"name": r.name, "description": r.description})
+                        result["resources"].append({
+                            "name": r.name, 
+                            "description": r.description if hasattr(r, 'description') else "No description"
+                        })
+                
+                # Fetch Tools
                 tools = await session.list_tools()
                 if hasattr(tools, 'tools'):
                     for t in tools.tools:
-                        result["tools"].append({"name": t.name, "description": getattr(t, 'description', 'No description')})
+                        result["tools"].append({
+                            "name": t.name, 
+                            "description": getattr(t, 'description', 'No description')
+                        })
+                
+                # Fetch Prompts
                 prompts = await session.list_prompts()
                 if hasattr(prompts, 'prompts'):
                     for p in prompts.prompts:
-                        args = [f"{arg.name} ({'Required' if arg.required else 'Optional'}): {arg.description}"
-                                for arg in getattr(p, 'arguments', [])]
+                        args = [
+                            f"{arg.name} ({'Required' if arg.required else 'Optional'}): {arg.description}"
+                            for arg in getattr(p, 'arguments', [])
+                        ]
                         result["prompts"].append({
                             "name": p.name,
                             "description": getattr(p, 'description', ''),
                             "args": args
                         })
+                
+                # Fetch YAML Models
                 try:
                     yaml_content = await session.read_resource("schematiclayer://cortex_analyst/schematic_models/hedis_stage_full/list")
                     if hasattr(yaml_content, 'contents'):
                         for item in yaml_content.contents:
                             if hasattr(item, 'text'):
                                 parsed = yaml.safe_load(item.text)
-                                result["yaml"].append({"name": item.name, "content": yaml.dump(parsed, sort_keys=False)})
+                                result["yaml"].append({
+                                    "name": item.name, 
+                                    "content": yaml.dump(parsed, sort_keys=False)
+                                })
                 except Exception as e:
-                    result["yaml"].append({"name": "YAML Load Error", "content": str(e)})
+                    result["yaml"].append({
+                        "name": "YAML Load Error", 
+                        "content": str(e)
+                    })
     except Exception as e:
-        st.sidebar.error(f"❌ MCP Error: {e}")
+        st.sidebar.error(f"❌ MCP Connection Error: {e}")
+        
     return result
 
 if st.sidebar.button("🔍 Load MCP Info"):
-    st.session_state.mcp_info = asyncio.run(fetch_mcp_info())
+    with st.sidebar.spinner("Loading MCP data..."):
+        st.session_state.mcp_info = asyncio.run(fetch_mcp_info())
+        st.sidebar.success("✅ MCP data loaded successfully!")
 
 # === MCP Info Display ===
 with st.sidebar.expander("📦 Resources"):
     for r in st.session_state.mcp_info["resources"]:
         st.markdown(f"**{r['name']}**\n\n{r['description']}")
 
+# === Tools Section ===
 with st.sidebar.expander("🛠 Tools"):
     for t in st.session_state.mcp_info["tools"]:
-        st.markdown(f"**{t['name']}**\n\n{t['description']}")
         tool_name = t['name']
+        st.markdown(f"<div class='tool-title'>{tool_name}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='tool-description'>{t['description']}</div>", unsafe_allow_html=True)
+        
+        # === Tool-specific UI ===
         if tool_name == "calculator":
-            calc_expr = st.sidebar.text_input("Expression", key=f"expr_{tool_name}")
-            if calc_expr and st.sidebar.button(f"▶️ Run {tool_name}", key=f"run_{tool_name}"):
-                async def run_tool(name, expression):
-                    try:
-                        async with sse_client(server_url) as sse_connection:
-                            async with ClientSession(*sse_connection) as session:
-                                await session.initialize()
-                                result = await session.call_tool(name, {"expression": expression})
-                                st.session_state.messages.append({
-                                    "role": "assistant",
-                                    "content": f"🧮 Calculator Result:\n\n{result.content[0].text}"
-                                })
-                    except Exception as e:
+            # Calculator tool arguments
+            calc_expr = st.text_input("Expression", key=f"expr_{tool_name}")
+            if st.button(f"▶️ Run {tool_name}", key=f"run_{tool_name}"):
+                if not calc_expr.strip():
+                    st.warning("❗ Please enter a valid expression.")
+                else:
+                    async def run_calculator(expression):
+                        try:
+                            async with sse_client(server_url) as sse_connection:
+                                async with ClientSession(*sse_connection) as session:
+                                    await session.initialize()
+                                    # Properly format arguments for calculator tool
+                                    result = await session.call_tool(tool_name, {"expression": expression})
+                                    return f"🧮 Calculator Result:\n\n{result.content[0].text}"
+                        except Exception as e:
+                            return f"❌ Tool `{tool_name}` error: {str(e)}"
+                    
+                    with st.spinner(f"Running {tool_name}..."):
+                        result = asyncio.run(run_calculator(calc_expr))
                         st.session_state.messages.append({
                             "role": "assistant",
-                            "content": f"❌ Tool `{name}` error: {e}"
+                            "content": result
                         })
-                asyncio.run(run_tool(tool_name, calc_expr))
+                        st.experimental_rerun()
+        
+        elif tool_name == "analyze":
+            # Analyze tool arguments
+            st.markdown("**Required arguments:**")
+            st.markdown("- data: JSON data to analyze")
+            st.markdown("- operation: Analysis operation to perform")
+            
+            operation = st.selectbox(
+                "Operation", 
+                ["mean", "median", "sum", "min", "max", "std"], 
+                key=f"operation_{tool_name}"
+            )
+            
+            if st.button(f"▶️ Run {tool_name} on uploaded JSON", key=f"run_{tool_name}"):
+                if st.session_state.uploaded_json is None:
+                    st.warning("❗ Please upload a JSON file first.")
+                else:
+                    async def run_analyze(json_data, operation):
+                        try:
+                            async with sse_client(server_url) as sse_connection:
+                                async with ClientSession(*sse_connection) as session:
+                                    await session.initialize()
+                                    # Properly format arguments for analyze tool
+                                    result = await session.call_tool(tool_name, {
+                                        "data": json_data,
+                                        "operation": operation
+                                    })
+                                    return f"📊 Analysis Result ({operation}):\n\n{result.content[0].text}"
+                        except Exception as e:
+                            return f"❌ Tool `{tool_name}` error: {str(e)}"
+                    
+                    with st.spinner(f"Running {tool_name}..."):
+                        result = asyncio.run(run_analyze(st.session_state.uploaded_json, operation))
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": result
+                        })
+                        st.experimental_rerun()
+        
+        elif tool_name == "mcp-send-email":
+            # Email tool arguments
+            st.markdown("**Required arguments:**")
+            st.markdown("- subject: Email subject")
+            st.markdown("- body: Email body")
+            st.markdown("- receivers: Email recipients (comma-separated)")
+            
+            subject = st.text_input("Subject", key=f"subject_{tool_name}")
+            body = st.text_area("Body", key=f"body_{tool_name}")
+            receivers = st.text_input("Recipients (comma-separated)", key=f"receivers_{tool_name}")
+            
+            if st.button(f"▶️ Send Email", key=f"run_{tool_name}"):
+                if not subject or not body or not receivers:
+                    st.warning("❗ All fields are required to send an email.")
+                else:
+                    async def send_email(subject, body, receivers):
+                        try:
+                            async with sse_client(server_url) as sse_connection:
+                                async with ClientSession(*sse_connection) as session:
+                                    await session.initialize()
+                                    # Properly format arguments for email tool
+                                    result = await session.call_tool(tool_name, {
+                                        "subject": subject,
+                                        "body": body,
+                                        "receivers": receivers.split(",")
+                                    })
+                                    return f"📧 Email Sent:\n\n{result.content[0].text}"
+                        except Exception as e:
+                            return f"❌ Tool `{tool_name}` error: {str(e)}"
+                    
+                    with st.spinner("Sending email..."):
+                        result = asyncio.run(send_email(subject, body, receivers))
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": result
+                        })
+                        st.experimental_rerun()
+        
         else:
-            if st.sidebar.button(f"▶️ Run {tool_name}", key=f"run_{tool_name}"):
+            # Generic tool run button for other tools
+            if st.button(f"▶️ Run {tool_name}", key=f"run_{tool_name}"):
                 async def run_tool(name):
                     try:
                         async with sse_client(server_url) as sse_connection:
                             async with ClientSession(*sse_connection) as session:
                                 await session.initialize()
                                 result = await session.call_tool(name, {})
-                                st.session_state.messages.append({
-                                    "role": "assistant",
-                                    "content": f"🛠️ Tool `{name}` executed:\n\n{result.content[0].text}"
-                                })
+                                return f"🛠️ Tool `{name}` executed:\n\n{result.content[0].text}"
                     except Exception as e:
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": f"❌ Tool `{name}` error: {e}"
-                        })
-                asyncio.run(run_tool(tool_name))
+                        return f"❌ Tool `{name}` error: {str(e)}"
+                
+                with st.spinner(f"Running {tool_name}..."):
+                    result = asyncio.run(run_tool(tool_name))
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": result
+                    })
+                    st.experimental_rerun()
 
 with st.sidebar.expander("🧠 Prompts"):
     for p in st.session_state.mcp_info["prompts"]:
@@ -148,10 +296,15 @@ with st.sidebar.expander("📄 YAML Models"):
         st.markdown(f"**{y['name']}**")
         st.code(y['content'], language="yaml")
 
-# === Chat Display ===
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+# === Chat Display Section ===
+st.markdown("### 💬 Chat")
+
+# Display chat messages
+chat_container = st.container()
+with chat_container:
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
 # === Chat Input ===
 query = st.chat_input("Ask something or describe your task")
@@ -211,40 +364,20 @@ def call_cortex_llm(text, context_window):
     except Exception as e:
         return f"❌ Cortex Exception: {str(e)}"
 
-# === Analyze Tool Request ===
-async def call_analyze_tool(data):
-    try:
-        async with sse_client(server_url) as sse_connection:
-            async with ClientSession(*sse_connection) as session:
-                await session.initialize()
-                result = await session.call_tool("analyze", {"json": data})
-                return result.content[0].text
-    except Exception as e:
-        return f"❌ MCP Analyze Tool Error: {e}"
-
 # === Handle Submission ===
-if query or st.session_state.uploaded_json:
-    if query:
-        st.session_state.messages.append({"role": "user", "content": query})
-        with st.chat_message("assistant"):
-            placeholder = st.empty()
-            placeholder.markdown("Thinking...")
+if query:
+    st.session_state.messages.append({"role": "user", "content": query})
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        placeholder.markdown("Thinking...")
 
-            prompt_type = detect_prompt_type(query)
-            response = call_cortex_llm(query, st.session_state.context_window)
-            placeholder.markdown(response)
+        prompt_type = detect_prompt_type(query)
+        response = call_cortex_llm(query, st.session_state.context_window)
+        placeholder.markdown(response)
 
-            st.session_state.context_window.append(f"User: {query}\nBot: {response}")
-            st.session_state.messages.append({"role": "assistant", "content": response})
-
-    if st.session_state.uploaded_json:
-        with st.chat_message("assistant"):
-            placeholder = st.empty()
-            placeholder.markdown("Analyzing uploaded JSON...")
-            result = asyncio.run(call_analyze_tool(st.session_state.uploaded_json))
-            placeholder.markdown(f"{result}\n\n🛠️ Tool used: `analyze`")
-            st.session_state.messages.append({"role": "assistant", "content": f"{result}\n\n🛠️ Tool used: `analyze`"})
-        st.session_state.uploaded_json = None
+        st.session_state.context_window.append(f"User: {query}\nBot: {response}")
+        st.session_state.messages.append({"role": "assistant", "content": response})
+        st.experimental_rerun()
 
 # === Clear Chat Button ===
 if st.sidebar.button("🧹 Clear Chat"):
@@ -252,3 +385,7 @@ if st.sidebar.button("🧹 Clear Chat"):
     st.session_state.context_window = []
     st.session_state.uploaded_json = None
     st.experimental_rerun()
+
+# === Footer ===
+st.markdown("---")
+st.markdown("Powered by Cortex + MCP | © 2025")
