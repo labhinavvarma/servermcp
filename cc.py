@@ -97,23 +97,43 @@ with st.sidebar.expander("🛠 Tools"):
     for t in st.session_state.mcp_info["tools"]:
         st.markdown(f"**{t['name']}**\n\n{t['description']}")
         tool_name = t['name']
-        if st.sidebar.button(f"▶️ Run {tool_name}", key=f"run_{tool_name}"):
-            async def run_tool(name):
-                try:
-                    async with sse_client(server_url) as sse_connection:
-                        async with ClientSession(*sse_connection) as session:
-                            await session.initialize()
-                            result = await session.call_tool(name, {})
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "content": f"🛠️ Tool `{name}` executed:\n\n{result.content[0].text}"
-                            })
-                except Exception as e:
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": f"❌ Tool `{name}` error: {e}"
-                    })
-            asyncio.run(run_tool(tool_name))
+        if tool_name == "calculator":
+            calc_expr = st.sidebar.text_input("Expression", key=f"expr_{tool_name}")
+            if st.sidebar.button(f"▶️ Run {tool_name}", key=f"run_{tool_name}") and calc_expr:
+                async def run_tool(name, args):
+                    try:
+                        async with sse_client(server_url) as sse_connection:
+                            async with ClientSession(*sse_connection) as session:
+                                await session.initialize()
+                                result = await session.call_tool(name, args)
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": f"🧮 Calculator Result:\n\n{result.content[0].text}"
+                                })
+                    except Exception as e:
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": f"❌ Tool `{name}` error: {e}"
+                        })
+                asyncio.run(run_tool(tool_name, {"expression": calc_expr}))
+        else:
+            if st.sidebar.button(f"▶️ Run {tool_name}", key=f"run_{tool_name}"):
+                async def run_tool(name):
+                    try:
+                        async with sse_client(server_url) as sse_connection:
+                            async with ClientSession(*sse_connection) as session:
+                                await session.initialize()
+                                result = await session.call_tool(name, {})
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": f"🛠️ Tool `{name}` executed:\n\n{result.content[0].text}"
+                                })
+                    except Exception as e:
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": f"❌ Tool `{name}` error: {e}"
+                        })
+                asyncio.run(run_tool(tool_name))
 
 with st.sidebar.expander("🧠 Prompts"):
     for p in st.session_state.mcp_info["prompts"]:
