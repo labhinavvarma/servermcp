@@ -143,9 +143,11 @@ async def fetch_mcp_info():
     return result
 
 if st.sidebar.button("🔍 Load MCP Info"):
-    with st.sidebar.spinner("Loading MCP data..."):
-        st.session_state.mcp_info = asyncio.run(fetch_mcp_info())
-        st.sidebar.success("✅ MCP data loaded successfully!")
+    # Using a progress message instead of spinner for compatibility
+    progress_placeholder = st.sidebar.empty()
+    progress_placeholder.info("Loading MCP data...")
+    st.session_state.mcp_info = asyncio.run(fetch_mcp_info())
+    progress_placeholder.success("✅ MCP data loaded successfully!")
 
 # === MCP Info Display ===
 with st.sidebar.expander("📦 Resources"):
@@ -178,13 +180,17 @@ with st.sidebar.expander("🛠 Tools"):
                         except Exception as e:
                             return f"❌ Tool `{tool_name}` error: {str(e)}"
                     
-                    with st.spinner(f"Running {tool_name}..."):
-                        result = asyncio.run(run_calculator(calc_expr))
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": result
-                        })
-                        st.experimental_rerun()
+                    # Use a progress message instead of spinner
+                    progress_placeholder = st.empty()
+                    progress_placeholder.info(f"Running {tool_name}...")
+                    result = asyncio.run(run_calculator(calc_expr))
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": result
+                    })
+                    # Note: Removed st.experimental_rerun() as it's deprecated in newer versions
+# If you're using an older version, you can uncomment this line:
+# st.experimental_rerun()
         
         elif tool_name == "analyze":
             # Analyze tool arguments
@@ -216,13 +222,15 @@ with st.sidebar.expander("🛠 Tools"):
                         except Exception as e:
                             return f"❌ Tool `{tool_name}` error: {str(e)}"
                     
-                    with st.spinner(f"Running {tool_name}..."):
-                        result = asyncio.run(run_analyze(st.session_state.uploaded_json, operation))
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": result
-                        })
-                        st.experimental_rerun()
+                    # Use a progress message instead of spinner
+                    progress_placeholder = st.empty()
+                    progress_placeholder.info(f"Running {tool_name}...")
+                    result = asyncio.run(run_analyze(st.session_state.uploaded_json, operation))
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": result
+                    })
+                    st.experimental_rerun()
         
         elif tool_name == "mcp-send-email":
             # Email tool arguments
@@ -254,13 +262,15 @@ with st.sidebar.expander("🛠 Tools"):
                         except Exception as e:
                             return f"❌ Tool `{tool_name}` error: {str(e)}"
                     
-                    with st.spinner("Sending email..."):
-                        result = asyncio.run(send_email(subject, body, receivers))
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": result
-                        })
-                        st.experimental_rerun()
+                    # Use a progress message instead of spinner
+                    progress_placeholder = st.empty()
+                    progress_placeholder.info("Sending email...")
+                    result = asyncio.run(send_email(subject, body, receivers))
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": result
+                    })
+                    st.experimental_rerun()
         
         else:
             # Generic tool run button for other tools
@@ -275,13 +285,15 @@ with st.sidebar.expander("🛠 Tools"):
                     except Exception as e:
                         return f"❌ Tool `{name}` error: {str(e)}"
                 
-                with st.spinner(f"Running {tool_name}..."):
-                    result = asyncio.run(run_tool(tool_name))
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": result
-                    })
-                    st.experimental_rerun()
+                # Use a progress message instead of spinner
+                progress_placeholder = st.empty()
+                progress_placeholder.info(f"Running {tool_name}...")
+                result = asyncio.run(run_tool(tool_name))
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": result
+                })
+                st.experimental_rerun()
 
 with st.sidebar.expander("🧠 Prompts"):
     for p in st.session_state.mcp_info["prompts"]:
