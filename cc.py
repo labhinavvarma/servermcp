@@ -14,22 +14,21 @@ APLCTN_CD = "edagnai"
 MODEL = "llama3.1-70b"
 SYS_MSG = "You are powerful AI assistant in providing accurate answers always. Be Concise in providing answers based on context."
 
-# === Session State ===
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
 # === Streamlit Page Config ===
 st.set_page_config(page_title="Cortex Chatbot", page_icon="🤖", layout="centered")
 st.title("🤖 Snowflake Cortex Chatbot")
 
-# === User Input ===
-user_input = st.text_input("Ask me anything:", placeholder="e.g. Who is the president of the USA?", key="input")
+# === Session State ===
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-# === Send to Cortex on submit ===
+# === Input Widget ===
+user_input = st.text_input("Ask something:", key="chat_input", placeholder="e.g. Who is the president of the USA?")
+
+# === Send Query on Submit ===
 if user_input:
-    session_id = str(uuid.uuid4())  # Optional: new session per question
+    session_id = str(uuid.uuid4())
 
-    # === Construct Payload ===
     payload = {
         "query": {
             "aplctn_cd": APLCTN_CD,
@@ -72,16 +71,16 @@ if user_input:
             st.session_state.messages.append(("user", user_input))
             st.session_state.messages.append(("bot", bot_reply))
 
-            # Clear input field
-            st.session_state.input = ""
+            # Clear input via rerun
+            st.experimental_rerun()
 
         else:
-            st.error(f"Error {response.status_code}: {response.text}")
+            st.error(f"❌ Error {response.status_code}: {response.text}")
 
     except Exception as e:
         st.error(f"❌ Request failed: {str(e)}")
 
-# === Display Chat History ===
+# === Chat History ===
 for role, message in reversed(st.session_state.messages):
     if role == "user":
         st.markdown(f"**🧑 You:** {message}")
