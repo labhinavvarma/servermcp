@@ -1,424 +1,475 @@
-import streamlit as st
-import requests
+from typing import Union, List, Dict, Optional, Any
+import statistics
 import json
-import pandas as pd
-import io
-import matplotlib.pyplot as plt
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime
+import logging
+import requests
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from dataclasses import dataclass
+from mcp.server.fastmcp import FastMCP, Context
+from snowflake.connector import SnowflakeConnection
+from ReduceReuseRecycleGENAI.snowflake import snowflake_conn
+from snowflake.core import Root
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from loguru import logger
+from ReduceReuseRecycleGENAI.smtp import get_ser_conn
 
-# Configuration
-API_URL = "http://localhost:8000"  # Replace with your actual server URL
-DEFAULT_TIMEOUT = 30  # seconds
 
-# Page setup
-st.set_page_config(
-    page_title="MCP Data Utility Tools",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+from mcp.server.fastmcp import Context, FastMCP
+logger = logging.getLogger(__name__)
 
-# --- Styling ---
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: 700;
-        margin-bottom: 1rem;
+
+# Create a named server
+NWS_API_BASE = "https://api.weather.gov"
+mcp = FastMCP("DataFlyWheel App")
+
+
+# --- Configurations ---
+ENV = "preprod"
+REGION_NAME = "us-east-1"
+SENDER_EMAIL = 'AbhinavVarma.Lakamraju@elevancehealth.com'
+
+
+# --- Categorized Prompt Library ---
+
+PROMPT_LIBRARY = {
+    "hedis": [
+        {"name": "Explain BCS Measure", "prompt": "Explain the purpose of the BCS HEDIS measure."},
+        {"name": "List 2024 HEDIS Measures", "prompt": "List all HEDIS measures for the year 2024."},
+        {"name": "Age Criteria for CBP", "prompt": "What is the age criteria for the CBP measure?"}
+    ],
+    "contract": [
+        {"name": "Summarize Contract H123", "prompt": "Summarize contract ID H123 for 2023."},
+        {"name": "Compare Contracts H456 & H789", "prompt": "Compare contracts H456 and H789 on key metrics."}
+    ]
+}
+
+@mcp.tool(name="ready-prompts", description="Return ready-made prompts by application category")
+def get_ready_prompts(category: str) -> dict:
+    category = category.lower()
+    if category not in PROMPT_LIBRARY:
+        return {"error": f"No prompts found for category '{category}'"}
+    return {
+        "category": category,
+        "prompts": PROMPT_LIBRARY[category]
     }
-    .tool-header {
-        font-size: 1.8rem;
-        font-weight: 600;
-        margin-top: 2rem;
-        margin-bottom: 1rem;
-        padding-bottom: 0.5rem;
-        border-bottom: 2px solid #f0f2f6;
-    }
-    .tool-description {
-        font-size: 1rem;
-        margin-bottom: 1.5rem;
-        color: #586069;
-    }
-    .success-box {
-        padding: 1rem;
-        background-color: #e6f4ea;
-        border-radius: 0.5rem;
-        border-left: 4px solid #34a853;
-    }
-    .error-box {
-        padding: 1rem;
-        background-color: #fce8e6;
-        border-radius: 0.5rem;
-        border-left: 4px solid #ea4335;
-    }
-    .info-box {
-        padding: 1rem;
-        background-color: #e8f0fe;
-        border-radius: 0.5rem;
-        border-left: 4px solid #4285f4;
-    }
-</style>
-""", unsafe_allow_html=True)
 
-# --- Utility Functions ---
-def check_api_health():
-    """Check if the API is available"""
-    try:
-        response = requests.get(f"{API_URL}/check", timeout=5)
-        if response.status_code == 200:
-            return True, response.json()
-        else:
-            return False, {"error": f"API returned status code {response.status_code}"}
-    except requests.exceptions.RequestException as e:
-        return False, {"error": str(e)}
 
-def get_available_tools():
-    """Get list of available tools from the API"""
-    try:
-        response = requests.get(f"{API_URL}/mcp-tools", timeout=5)
-        if response.status_code == 200:
-            return response.json().get("registered_tools", [])
-        else:
-            return []
-    except requests.exceptions.RequestException:
-        return []
+@dataclass
+class AppContext:
+    conn: SnowflakeConnection
+    db: str
+    schema: str
+    host: str  
 
-def display_json_preview(json_data):
-    """Display a formatted preview of JSON data"""
-    st.code(json.dumps(json_data, indent=2), language="json")
 
-def display_result(success, data, error_message=None):
-    """Display API call results with appropriate styling"""
-    if success:
-        st.markdown('<div class="success-box">', unsafe_allow_html=True)
-        st.markdown("#### ✅ Success!")
-        if isinstance(data, dict):
-            display_json_preview(data)
-        else:
-            st.write(data)
-        st.markdown('</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="error-box">', unsafe_allow_html=True)
-        st.markdown("#### ❌ Error")
-        if error_message:
-            st.write(error_message)
-        if data:
-            if isinstance(data, dict):
-                display_json_preview(data)
-            else:
-                st.write(data)
-        st.markdown('</div>', unsafe_allow_html=True)
+#@asynccontextmanager
+#async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
+#    """Manage application lifecycle with type-safe context"""
+#    # Initialize on startup
 
-def parse_numeric_data(uploaded_file):
-    """Parse numeric data from uploaded file (JSON or CSV)"""
-    try:
-        # Get file extension
-        file_extension = uploaded_file.name.split('.')[-1].lower()
-        
-        if file_extension == 'json':
-            # Parse JSON file
-            data = json.load(uploaded_file)
-            return True, data, None
-        elif file_extension == 'csv':
-            # Parse CSV file
-            df = pd.read_csv(uploaded_file)
-            
-            # Convert DataFrame to dictionary format expected by the analyze tool
-            data_dict = {}
-            for column in df.columns:
-                # Only include numeric columns
-                if pd.api.types.is_numeric_dtype(df[column]):
-                    data_dict[column] = df[column].tolist()
-            
-            if not data_dict:
-                return False, None, "No numeric columns found in the CSV file."
-            
-            return True, data_dict, None
-        else:
-            return False, None, f"Unsupported file extension: {file_extension}. Please upload a JSON or CSV file."
-    except Exception as e:
-        return False, None, f"Error parsing file: {str(e)}"
+#    try:
+#        yield AppContext(conn=conn,db="DOC_AI_DB",schema="HEDIS_SCHEMA",host=HOST)
+#    finally:
+#        # Cleanup on shutdown
+#        conn.close()
 
-def visualize_analysis_results(data, operation):
-    """Create visualizations based on the analysis results"""
-    if not data or "status" not in data or data["status"] != "success":
-        return
-    
-    result = data.get("result")
-    
-    if isinstance(result, dict):
-        # Multiple columns/series
-        df = pd.DataFrame({"Category": list(result.keys()), "Value": list(result.values())})
-        
-        # Create bar chart
-        fig = px.bar(
-            df, 
-            x="Category", 
-            y="Value", 
-            title=f"{operation.capitalize()} Values by Category",
-            labels={"Value": operation.capitalize()},
-            color="Category"
+
+# Pass lifespan to server
+#mcp = FastMCP("DataFlyWheel App", lifespan=app_lifespan)
+
+
+#Stag name may need to be determined; requires code change
+#Resources; Have access to resources required for the server; Cortex Search; Cortex stage schematic config; stage area should be fully qualified name
+@mcp.resource(uri="schematiclayer://cortex_analyst/schematic_models/{stagename}/list", name="hedis_schematic_models", description="Hedis Schematic models")
+async def get_schematic_model(stagename: str):
+    """Cortex analyst schematic layer model, model is in yaml format"""
+    #ctx = mcp.get_context()
+
+    HOST = "carelon-eda-preprod.privatelink.snowflakecomputing.com"
+    conn = snowflake_conn(
+           logger,
+           aplctn_cd="aedl",
+           env="preprod",
+           region_name="us-east-1",
+           warehouse_size_suffix="",
+           prefix=""
         )
-        st.plotly_chart(fig, use_container_width=True)
+    #conn = ctx.request_context.lifespan_context.conn
+    db = 'POC_SPC_SNOWPARK_DB'
+    schema = 'HEDIS_SCHEMA'
+    cursor = conn.cursor()
+    snfw_model_list = cursor.execute("LIST @{db}.{schema}.{stagename}".format(db=db, schema=schema, stagename=stagename))
+
+    return [stg_nm[0].split("/")[-1] for stg_nm in snfw_model_list if stg_nm[0].endswith('yaml')]
+   
+@mcp.resource(uri="search://cortex_search/search_obj/list", name="hedis_search", description="Hedis search indexes")
+async def get_search_service():
+    """Cortex search service"""
+
+    HOST = "carelon-eda-preprod.privatelink.snowflakecomputing.com"
+    conn = snowflake_conn(
+           logger,
+           aplctn_cd="aedl",
+           env="preprod",
+           region_name="us-east-1",
+           warehouse_size_suffix="",
+           prefix=""
+        )
+    #conn = ctx.request_context.lifespan_context.conn
+    db = 'POC_SPC_SNOWPARK_DB'
+    schema = 'HEDIS_SCHEMA'
+    cursor = conn.cursor()
+    snfw_search_objs = cursor.execute("SHOW CORTEX SEARCH SERVICES IN SCHEMA {db}.{schema}".format(db=db, schema=schema))
+    result = [search_obj[1] for search_obj in snfw_search_objs.fetchall()]
+   
+    return result
+
+#Tools; corex Analyst; Cortex Search; Cortex Complete
+
+@mcp.tool(
+        name="DFWAnalyst",
+        description="""
+        Coneverts text to valid SQL which can be executed on HEDIS value sets and code sets.
+       
+        Example inputs:
+           What are the codes in <some value> Value Set?
+
+        Returns valid sql to retive data from underlying value sets and code sets.  
+
+        Args:
+               prompt (str):  text to be passed
+
+        """
+)
+async def dfw_text2sql(prompt: str, ctx: Context) -> dict:
+    """Tool to convert natural language text to snowflake sql for hedis system, text should be passed as 'prompt' input perameter"""
+
+    HOST = "carelon-eda-preprod.privatelink.snowflakecomputing.com"
+    conn = snowflake_conn(
+           logger,
+           aplctn_cd="aedl",
+           env="preprod",
+           region_name="us-east-1",
+           warehouse_size_suffix="",
+           prefix=""
+        )
+
+    #conn = ctx.request_context.lifespan_context.conn
+    db = 'POC_SPC_SNOWPARK_DB'
+    schema = 'HEDIS_SCHEMA'    
+    host = HOST
+    stage_name = "hedis_stage_full"
+    file_name = "hedis_semantic_model_complete.yaml"
+    request_body = {
+        "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+        "semantic_model_file": f"@{db}.{schema}.{stage_name}/{file_name}",
+    }
+
+    token = conn.rest.token
+    resp = requests.post(
+        url=f"https://{host}/api/v2/cortex/analyst/message",
+        json=request_body,
+        headers={
+            "Authorization": f'Snowflake Token="{token}"',
+            "Content-Type": "application/json",
+        },
+    )
+    return resp.json()
+
+#Need to change the type of serch, implimented in the below code; Revisit
+@mcp.tool(
+        name="DFWSearch",
+        description="""
+        Searches HEDIS measure specification documents.
+
+        Example inputs:
+        What is the age criteria for BCS Measure?
+        What is EED Measure in HEDIS?
+        Describe COA Measure?
+        What LOB is COA measure scoped under?
+
+        Return result from HEDIS measure speficification documents.
+
+        Args:
+              query (str): text to be passed
+       """
+)
+async def dfw_search(ctx: Context, query: str):
+    """Tool to provide search againest HEDIS business documents for the year 2024, search string should be provided as 'query' perameter"""
+
+    HOST = "carelon-eda-preprod.privatelink.snowflakecomputing.com"
+    conn = snowflake_conn(
+           logger,
+           aplctn_cd="aedl",
+           env="preprod",
+           region_name="us-east-1",
+           warehouse_size_suffix="",
+           prefix=""
+        )
+
+    #conn = ctx.request_context.lifespan_context.conn
+    db = 'POC_SPC_SNOWPARK_DB'
+    schema = 'HEDIS_SCHEMA'
+    search_service = 'CS_HEDIS_FULL_2024'
+    columns = ['chunk']
+    limit = 2    
+
+    root = Root(conn)
+    search_service = root.databases[db].schemas[schema].cortex_search_services[search_service]
+    response = search_service.search(
+        query=query,
+        columns=columns,
+        limit=limit
+    )
+    return response.to_json()
+
+@mcp.tool(
+        name="calculator",
+        description="""
+        Evaluates a basic arithmetic expression.
+        Supports: +, -, *, /, parentheses, decimals.
+
+        Example inputs:
+        3+4/5
+        3.0/6*8
+
+        Returns decimal result
+
+        Args:
+             expression (str): Arthamatic expression input
+         
+        """
+)
+def calculate(expression: str) -> str:
+    """
+    Evaluates a basic arithmetic expression.
+    Supports: +, -, *, /, parentheses, decimals.
+    """
+    print(f" calculate() called with expression: {expression}", flush=True)
+    try:
+        allowed_chars = "0123456789+-*/(). "
+        if any(char not in allowed_chars for char in expression):
+            return " Invalid characters in expression."
+
+        result = eval(expression)
+        return f" Result: {result}"
+    except Exception as e:
+        print(" Error in calculate:", str(e), flush=True)
+        return f" Error: {str(e)}"
+
+@mcp.tool()
+def get_weather(latitude: float, longitude: float) -> str:
+    """
+    Fetches current weather forecast for a given location using the NWS API.
+   
+    Args:
+        latitude: Latitude of the location (e.g., 40.7128 for New York City)
+        longitude: Longitude of the location (e.g., -74.0060 for New York City)
+   
+    Returns:
+        Weather forecast information as a string
+    """
+    print(f" get_weather() called for coordinates: ({latitude}, {longitude})", flush=True)
+    try:
+        # Set headers for the API request
+        headers = {
+            "User-Agent": "MCP Weather Client (your-email@example.com)",
+            "Accept": "application/geo+json"
+        }
+       
+        # Step 1: Get the grid points for the provided coordinates
+        points_url = f"{NWS_API_BASE}/points/{latitude},{longitude}"
+        points_response = requests.get(points_url, headers=headers)
+        points_response.raise_for_status()
+        points_data = points_response.json()
+       
+        # Extract the forecast URL from the response
+        forecast_url = points_data['properties']['forecast']
+        location_name = f"{points_data['properties']['relativeLocation']['properties']['city']}, {points_data['properties']['relativeLocation']['properties']['state']}"
+       
+        # Step 2: Get the forecast using the URL from the previous response
+        forecast_response = requests.get(forecast_url, headers=headers)
+        forecast_response.raise_for_status()
+        forecast_data = forecast_response.json()
+       
+        # Extract the current period's forecast
+        current_period = forecast_data['properties']['periods'][0]
+       
+        # Format and return the weather information
+        weather_info = (
+            f" Weather for {location_name}:\n"
+            f" - Period: {current_period['name']}\n"
+            f" - Temperature: {current_period['temperature']}°{current_period['temperatureUnit']}\n"
+            f" - Conditions: {current_period['shortForecast']}\n"
+            f" - Wind: {current_period['windSpeed']} {current_period['windDirection']}\n"
+            f" - Detailed Forecast: {current_period['detailedForecast']}"
+        )
+        return weather_info
+       
+    except requests.exceptions.RequestException as e:
+        print(" Error in get_weather (request):", str(e), flush=True)
+        return f" Error fetching weather data: {str(e)}"
+    except (KeyError, ValueError, json.JSONDecodeError) as e:
+        print(" Error in get_weather (parsing):", str(e), flush=True)
+        return f" Error parsing weather data: {str(e)}"
+
+# --- Email Tool ---
+class EmailRequest(BaseModel):
+    subject: str
+    body: str
+    receivers: str
+
+@mcp.tool(
+    name="analyze",
+    description="""
+    Analyzes numeric data with statistical operations.
+
+    Example inputs:
+        Data: [1, 2, 3, 4, 5], Operation: "mean"
+        Data: {"col1": [10, 20, 30], "col2": [5, 15, 25]}, Operation: "sum"
+
+    Supported operations:
+        "sum", "mean", "median", "min", "max", "average"
+
+    Args:
+        data (Union[List, Dict[str, List]]): Numeric data to analyze
+        operation (str): Statistical operation to perform
+
+    Returns:
+        Dict: Result of statistical analysis with status
+    """
+)
+async def analyze(data: Union[List, Dict[str, List]], operation: str) -> Dict:
+    """Performs statistical analysis on numeric data"""
+    logger.info(f"Analyzer called with operation: {operation}")
+    try:
+        operation = operation.lower()
         
-        # Create table
-        st.dataframe(df, use_container_width=True)
-    else:
-        # Single value result - show as big number with caption
-        st.metric(label=f"{operation.capitalize()} Value", value=f"{result:.4f}")
-
-# --- Sidebar ---
-st.sidebar.markdown('<h1 class="main-header">MCP Data Utility Tools</h1>', unsafe_allow_html=True)
-st.sidebar.markdown("---")
-
-# Check API health
-api_ok, api_message = check_api_health()
-if api_ok:
-    st.sidebar.success("✅ API is online")
-else:
-    st.sidebar.error(f"❌ API is offline: {api_message.get('error', 'Unknown error')}")
-
-# Navigation
-tool_options = [
-    "Data Analyzer",
-    "Calculator",
-    "Weather Forecast",
-    "Email Sender",
-    "HEDIS Text-to-SQL",
-    "HEDIS Document Search"
-]
-
-selected_tool = st.sidebar.radio("Select Tool", tool_options)
-
-st.sidebar.markdown("---")
-st.sidebar.info("""
-This application provides a user interface for the MCP Data Utility Tools API. 
-Select a tool from the menu to get started.
-""")
-
-# --- Main Content ---
-st.markdown(f'<h1 class="tool-header">{selected_tool}</h1>', unsafe_allow_html=True)
-
-# === Data Analyzer Tool ===
-if selected_tool == "Data Analyzer":
-    st.markdown('<p class="tool-description">Upload JSON or CSV data files and perform statistical analysis.</p>', unsafe_allow_html=True)
-    
-    # File uploader
-    uploaded_file = st.file_uploader("Upload a JSON or CSV file", type=["json", "csv"])
-    
-    if uploaded_file is not None:
-        # Parse the uploaded file
-        success, data, error_message = parse_numeric_data(uploaded_file)
+        # Map 'average' to 'mean' since they are mathematically equivalent
+        if operation == "average":
+            operation = "mean"
+            
+        valid_ops = ["sum", "mean", "median", "min", "max", "average"]
         
-        if success:
-            st.markdown('<div class="info-box">', unsafe_allow_html=True)
-            st.markdown("#### 📄 Parsed Data Preview")
-            display_json_preview(data)
-            st.markdown('</div>', unsafe_allow_html=True)
-            
-            # Operation selection
-            operation = st.selectbox(
-                "Select statistical operation",
-                ["mean", "median", "sum", "min", "max"]
-            )
-            
-            # Submit button
-            if st.button("Analyze Data"):
-                with st.spinner("Analyzing data..."):
-                    try:
-                        # Call the analyze endpoint
-                        response = requests.post(
-                            f"{API_URL}/analyze",
-                            json={"data": data, "operation": operation},
-                            timeout=DEFAULT_TIMEOUT
-                        )
-                        
-                        if response.status_code == 200:
-                            result_data = response.json()
-                            display_result(True, result_data)
-                            
-                            # Visualize the results
-                            st.markdown("### Visualization")
-                            visualize_analysis_results(result_data, operation)
-                        else:
-                            display_result(False, response.json(), f"API returned status code {response.status_code}")
-                    except requests.exceptions.RequestException as e:
-                        display_result(False, None, f"API request failed: {str(e)}")
-        else:
-            display_result(False, None, error_message)
+        if operation not in valid_ops:
+            return {"status": "error", "error": f"Invalid operation. Choose from: {', '.join(valid_ops)}"}
 
-# === Calculator Tool ===
-elif selected_tool == "Calculator":
-    st.markdown('<p class="tool-description">Evaluate arithmetic expressions safely.</p>', unsafe_allow_html=True)
-    
-    expression = st.text_input("Enter arithmetic expression", placeholder="e.g., (5 + 10) * 2")
-    
-    if st.button("Calculate") and expression:
-        with st.spinner("Calculating..."):
-            try:
-                # Call the calculator endpoint
-                response = requests.post(
-                    f"{API_URL}/calculate",
-                    json={"expression": expression},
-                    timeout=DEFAULT_TIMEOUT
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    display_result(True, result)
-                else:
-                    display_result(False, response.json(), f"API returned status code {response.status_code}")
-            except requests.exceptions.RequestException as e:
-                display_result(False, None, f"API request failed: {str(e)}")
+        def extract_numbers(raw):
+            return [float(n) for n in raw if isinstance(n, (int, float)) or
+                   (isinstance(n, str) and n.replace('.', '', 1).isdigit())]
 
-# === Weather Forecast Tool ===
-elif selected_tool == "Weather Forecast":
-    st.markdown('<p class="tool-description">Get current weather forecasts for any location.</p>', unsafe_allow_html=True)
-    
-    place = st.text_input("Enter location", placeholder="e.g., New York, NY")
-    
-    if st.button("Get Weather") and place:
-        with st.spinner(f"Getting weather for {place}..."):
-            try:
-                # Call the weather endpoint
-                response = requests.post(
-                    f"{API_URL}/get_weather",
-                    json={"place": place},
-                    timeout=DEFAULT_TIMEOUT
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    
-                    # Check if result is a string or dict
-                    if isinstance(result, str):
-                        display_result(True, result)
-                    else:
-                        display_result(True, result)
-                else:
-                    display_result(False, response.json(), f"API returned status code {response.status_code}")
-            except requests.exceptions.RequestException as e:
-                display_result(False, None, f"API request failed: {str(e)}")
+        if isinstance(data, list):
+            numbers = extract_numbers(data)
+            if not numbers:
+                return {"status": "error", "error": "No valid numeric values found in list."}
 
-# === Email Sender Tool ===
-elif selected_tool == "Email Sender":
-    st.markdown('<p class="tool-description">Send emails to multiple recipients.</p>', unsafe_allow_html=True)
-    
-    subject = st.text_input("Subject", placeholder="e.g., Meeting Reminder")
-    receivers = st.text_input("Recipients (comma-separated)", placeholder="e.g., user1@example.com, user2@example.com")
-    
-    # Email body with rich text editor
-    st.write("Email Body:")
-    body = st.text_area("", height=200, placeholder="Enter email content here...")
-    
-    if st.button("Send Email") and subject and receivers and body:
-        with st.spinner("Sending email..."):
-            try:
-                # Call the email endpoint
-                response = requests.post(
-                    f"{API_URL}/send_test_email",
-                    json={"subject": subject, "body": body, "receivers": receivers},
-                    timeout=DEFAULT_TIMEOUT
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    if result.get("status") == "success":
-                        display_result(True, result)
-                    else:
-                        display_result(False, result, "Email could not be sent")
-                else:
-                    display_result(False, response.json(), f"API returned status code {response.status_code}")
-            except requests.exceptions.RequestException as e:
-                display_result(False, None, f"API request failed: {str(e)}")
+            result = {
+                "sum": sum(numbers),
+                "mean": statistics.mean(numbers),
+                "median": statistics.median(numbers),
+                "min": min(numbers),
+                "max": max(numbers)
+            }[operation]
 
-# === HEDIS Text-to-SQL Tool ===
-elif selected_tool == "HEDIS Text-to-SQL":
-    st.markdown('<p class="tool-description">Convert natural language queries to SQL for HEDIS datasets.</p>', unsafe_allow_html=True)
-    
-    prompt = st.text_area("Enter your question about HEDIS codes", 
-                         placeholder="e.g., What are the codes in Breast Cancer Value Set?", 
-                         height=100)
-    
-    if st.button("Generate SQL") and prompt:
-        with st.spinner("Converting to SQL..."):
-            try:
-                # Call the text2sql endpoint
-                response = requests.post(
-                    f"{API_URL}/DFWAnalyst",
-                    json={"prompt": prompt},
-                    timeout=DEFAULT_TIMEOUT
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    
-                    # Extract SQL if available
-                    sql = None
-                    if isinstance(result, dict) and "message" in result:
-                        message = result["message"]
-                        if isinstance(message, dict) and "content" in message:
-                            for content_item in message["content"]:
-                                if content_item.get("type") == "sql":
-                                    sql = content_item.get("statement")
-                    
-                    if sql:
-                        st.markdown("### Generated SQL")
-                        st.code(sql, language="sql")
-                    
-                    display_result(True, result)
-                else:
-                    display_result(False, response.json(), f"API returned status code {response.status_code}")
-            except requests.exceptions.RequestException as e:
-                display_result(False, None, f"API request failed: {str(e)}")
+            return {"status": "success", "result": result}
 
-# === HEDIS Document Search Tool ===
-elif selected_tool == "HEDIS Document Search":
-    st.markdown('<p class="tool-description">Search HEDIS measure specification documents for relevant information.</p>', unsafe_allow_html=True)
-    
-    query = st.text_area("Enter your search query", 
-                        placeholder="e.g., What is the age criteria for BCS Measure?", 
-                        height=100)
-    
-    if st.button("Search") and query:
-        with st.spinner("Searching HEDIS documents..."):
-            try:
-                # Call the search endpoint
-                response = requests.post(
-                    f"{API_URL}/DFWSearch",
-                    json={"query": query},
-                    timeout=DEFAULT_TIMEOUT
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    
-                    # Extract and display search results in a more readable format
-                    if isinstance(result, dict) and "results" in result:
-                        st.markdown("### Search Results")
-                        
-                        for i, item in enumerate(result["results"]):
-                            st.markdown(f"**Result {i+1}**")
-                            
-                            if "chunk" in item:
-                                st.markdown(item["chunk"])
-                            else:
-                                display_json_preview(item)
-                            
-                            st.markdown("---")
-                    
-                    display_result(True, result)
-                else:
-                    display_result(False, response.json(), f"API returned status code {response.status_code}")
-            except requests.exceptions.RequestException as e:
-                display_result(False, None, f"API request failed: {str(e)}")
+        elif isinstance(data, dict):
+            result_dict = {}
+            for key, values in data.items():
+                if not isinstance(values, list):
+                    continue
 
-# --- Footer ---
-st.markdown("---")
-st.markdown("""
-<div style="text-align: center; color: #777;">
-    MCP Data Utility Tools Client • {0}
-</div>
-""".format(datetime.now().year), unsafe_allow_html=True)
+                numbers = extract_numbers(values)
+                if numbers:
+                    result_dict[key] = {
+                        "sum": sum(numbers),
+                        "mean": statistics.mean(numbers),
+                        "median": statistics.median(numbers),
+                        "min": min(numbers),
+                        "max": max(numbers)
+                    }[operation]
+
+            if not result_dict:
+                return {"status": "error", "error": "No valid numeric data in any columns."}
+
+            return {"status": "success", "result": result_dict}
+
+        return {"status": "error", "error": f"Invalid input type: {type(data).__name__}"}
+
+    except Exception as e:
+        logger.error(f"Error in analyzer: {str(e)}")
+        return {"status": "error", "error": str(e)}
+
+@mcp.tool(name="mcp-send-email", description="Send an email with a subject and HTML body to recipients.")
+def mcp_send_email(subject: str, body: str, receivers: str) -> Dict:
+    try:
+        recipients = [email.strip() for email in receivers.split(",")]
+
+        msg = MIMEMultipart()
+        msg['Subject'] = subject
+        msg['From'] = SENDER_EMAIL
+        msg['To'] = ', '.join(recipients)
+        msg.attach(MIMEText(body, 'html'))
+
+        smtp = get_ser_conn(logger, env=ENV, region_name=REGION_NAME, aplctn_cd="aedl", port=None, tls=True, debug=False)
+        smtp.sendmail(SENDER_EMAIL, recipients, msg.as_string())
+        smtp.quit()
+
+        logger.info("Email sent successfully.")
+        return {"status": "success", "message": "Email sent successfully."}
+    except Exception as e:
+        logger.error(f"Error sending email: {e}")
+        return {"status": "error", "message": str(e)}
+
+# --- MCP Prompts ---
+# HEDIS Application Prompts
+@mcp.prompt(name="hedis.explain-bcs", description="Explain the BCS HEDIS measure.")
+async def explain_bcs() -> str:
+    print("\n [HEDIS] BCS Prompt Called")
+    return "Explain the purpose of the BCS HEDIS measure."
+
+@mcp.prompt(name="hedis.list-2024", description="List HEDIS measures for 2024.")
+async def list_hedis_2024() -> str:
+    print("\n [HEDIS] 2024 List Prompt Called")
+    return "List all HEDIS measures for the year 2024."
+
+@mcp.prompt(name="hedis.cbp-age", description="Get age criteria for CBP measure.")
+async def cbp_age_criteria() -> str:
+    print("\n [HEDIS] CBP Age Criteria Prompt Called")
+    return "What is the age criteria for the CBP HEDIS measure?"
+
+# Contract Application Prompts
+@mcp.prompt(name="contract.summarize-h123", description="Summarize contract ID H123.")
+async def summarize_contract() -> str:
+    print("\n [CONTRACT] H123 Summary Prompt Called")
+    return "Summarize contract ID H123 for 2023."
+
+@mcp.prompt(name="contract.compare", description="Compare contracts H456 and H789.")
+async def compare_contracts() -> str:
+    print("\n [CONTRACT] Comparison Prompt Called")
+    return "Compare contracts H456 and H789 on key metrics."
+
+# Original MCP Prompts
+@mcp.prompt(name="mcp-prompt-calculator", description="Prompt template for calculator use case.")
+async def mcp_prompt_calculator() -> str:
+    return "You are a calculator assistant. Use the mcp-calculator tool to evaluate expressions."
+
+@mcp.prompt(name="mcp-prompt-json-analyzer", description="Prompt template for JSON analysis use case.")
+async def mcp_prompt_json_analyzer() -> str:
+    return "You are a data analyst. Use the mcp-json-analyzer tool to analyze JSON numeric data."
+
+@mcp.prompt(name="mcp-prompt-weather", description="Prompt template for weather lookup use case.")
+async def mcp_prompt_weather() -> str:
+    return "You are a weather assistant. Use the mcp-get-weather tool to get the forecast for a location."
+
+@mcp.prompt(name="mcp-prompt-send-email", description="Prompt template for email dispatch use case.")
+async def mcp_prompt_send_email() -> str:
+    return "You are an automated mail agent. Use the mcp-send-email tool to send messages."
+
+
+if __name__ == "__main__":
+    mcp.run(transport="sse")
