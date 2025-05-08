@@ -31,9 +31,20 @@ if "yaml_models" not in st.session_state:
     st.session_state.yaml_models = {}
 if "mcp_info" not in st.session_state:
     st.session_state.mcp_info = {"resources": [], "tools": [], "prompts": [], "yaml": []}
+if "uploaded_json" not in st.session_state:
+    st.session_state.uploaded_json = None
 
 # === MCP Server URL ===
 server_url = st.sidebar.text_input("MCP Server URL", "http://localhost:8000/sse")
+
+# === JSON File Upload ===
+uploaded_file = st.sidebar.file_uploader("📂 Upload JSON for Analyze Tool", type=["json"])
+if uploaded_file:
+    try:
+        st.session_state.uploaded_json = json.load(uploaded_file)
+        st.sidebar.success("✅ JSON loaded successfully!")
+    except Exception as e:
+        st.sidebar.error(f"❌ Failed to parse JSON: {e}")
 
 # === MCP Metadata Fetch ===
 async def fetch_mcp_info():
@@ -161,22 +172,42 @@ def call_cortex_llm(text, context_window):
     except Exception as e:
         return f"❌ Cortex Exception: {str(e)}"
 
-# === Handle Query Submission ===
-if query:
-    st.session_state.messages.append({"role": "user", "content": query})
-    with st.chat_message("assistant"):
-        placeholder = st.empty()
-        placeholder.markdown("Thinking...")
+# === Analyze Tool Request ===
+async def call_analyze_tool(data):
+    try:
+        async with MultiServerMCPClient({"DataFlyWheelServer": {"url": server_url, "transport": "sse"}}) as client:
+            result = await client.call_tool("analyze", {"json": data})
+            return result.content[0].text
+    except Exception as e:
+        return f"❌ MCP Analyze Tool Error: {e}"
 
-        prompt_type = detect_prompt_type(query)
-        response = call_cortex_llm(query, st.session_state.context_window)
-        placeholder.markdown(response)
+# === Handle Submission ===
+if query or st.session_state.uploaded_json:
+    if query:
+        st.session_state.messages.append({"role": "user", "content": query})
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+            placeholder.markdown("Thinking...")
 
-        st.session_state.context_window.append(f"User: {query}\nBot: {response}")
-        st.session_state.messages.append({"role": "assistant", "content": response})
+            prompt_type = detect_prompt_type(query)
+            response = call_cortex_llm(query, st.session_state.context_window)
+            placeholder.markdown(response)
+
+            st.session_state.context_window.append(f"User: {query}\nBot: {response}")
+            st.session_state.messages.append({"role": "assistant", "content": response})
+
+    if st.session_state.uploaded_json:
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+            placeholder.markdown("Analyzing uploaded JSON...")
+            result = asyncio.run(call_analyze_tool(st.session_state.uploaded_json))
+            placeholder.markdown(f"{result}\n\n🛠️ Tool used: `analyze`")
+            st.session_state.messages.append({"role": "assistant", "content": f"{result}\n\n🛠️ Tool used: `analyze`"})
+        st.session_state.uploaded_json = None
 
 # === Clear Chat Button ===
 if st.sidebar.button("🧹 Clear Chat"):
     st.session_state.messages = []
     st.session_state.context_window = []
+    st.session_state.uploaded_json = None
     st.experimental_rerun()
