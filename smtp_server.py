@@ -1,246 +1,424 @@
-#!/usr/bin/env python3
-"""
-SMTP MCP Server for Claude
-This MCP server allows Claude to send emails via SMTP protocol.
-"""
-
-import os
-import logging
-import smtplib
+import streamlit as st
+import requests
 import json
-import argparse
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import pandas as pd
+import io
+import matplotlib.pyplot as plt
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime
 
-# Import FastMCP from the correct module
-try:
-    from mcp.server.fastmcp import FastMCP
-except ImportError:
-    try:
-        # Try the alternate import path
-        from fastmcp import FastMCP
-    except ImportError:
-        print("ERROR: Required modules not found. Please install with:")
-        print("pip install mcp-sdk fastmcp")
-        exit(1)
+# Configuration
+API_URL = "http://localhost:8000"  # Replace with your actual server URL
+DEFAULT_TIMEOUT = 30  # seconds
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+# Page setup
+st.set_page_config(
+    page_title="MCP Data Utility Tools",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
-logger = logging.getLogger("smtp-mcp")
 
-# Initialize the MCP server with the name "smtp"
-logger.info("Starting SMTP MCP Server...")
-mcp = FastMCP("smtp")
+# --- Styling ---
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: 700;
+        margin-bottom: 1rem;
+    }
+    .tool-header {
+        font-size: 1.8rem;
+        font-weight: 600;
+        margin-top: 2rem;
+        margin-bottom: 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid #f0f2f6;
+    }
+    .tool-description {
+        font-size: 1rem;
+        margin-bottom: 1.5rem;
+        color: #586069;
+    }
+    .success-box {
+        padding: 1rem;
+        background-color: #e6f4ea;
+        border-radius: 0.5rem;
+        border-left: 4px solid #34a853;
+    }
+    .error-box {
+        padding: 1rem;
+        background-color: #fce8e6;
+        border-radius: 0.5rem;
+        border-left: 4px solid #ea4335;
+    }
+    .info-box {
+        padding: 1rem;
+        background-color: #e8f0fe;
+        border-radius: 0.5rem;
+        border-left: 4px solid #4285f4;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# Default configuration (can be overridden)
-# For Docker, use a path that's in a mounted volume
-DEFAULT_CONFIG_PATH = os.environ.get('CONFIG_PATH', '/app/config/smtp_config.json')
-if not os.path.exists(os.path.dirname(DEFAULT_CONFIG_PATH)):
-    # Fall back to home directory if the container path doesn't exist
-    DEFAULT_CONFIG_PATH = os.path.expanduser("~/.smtp_mcp_config.json")
-
-DEFAULT_CONFIG = {
-    "smtp_server": "smtp.gmail.com",
-    "smtp_port": 587,
-    "use_tls": True,
-    "email": "",  # Empty by default for security
-    "password": ""  # Empty by default for security
-}
-
-def load_config():
-    """Load SMTP configuration from file or use defaults."""
+# --- Utility Functions ---
+def check_api_health():
+    """Check if the API is available"""
     try:
-        if os.path.exists(DEFAULT_CONFIG_PATH):
-            with open(DEFAULT_CONFIG_PATH, 'r') as f:
-                config = json.load(f)
-                logger.info(f"Loaded config from {DEFAULT_CONFIG_PATH}")
-                return config
+        response = requests.get(f"{API_URL}/check", timeout=5)
+        if response.status_code == 200:
+            return True, response.json()
         else:
-            logger.warning(f"Config file not found at {DEFAULT_CONFIG_PATH}, using defaults")
-            return DEFAULT_CONFIG.copy()
-    except Exception as e:
-        logger.error(f"Error loading config: {str(e)}")
-        return DEFAULT_CONFIG.copy()
+            return False, {"error": f"API returned status code {response.status_code}"}
+    except requests.exceptions.RequestException as e:
+        return False, {"error": str(e)}
 
-def save_config(config):
-    """Save SMTP configuration to file."""
+def get_available_tools():
+    """Get list of available tools from the API"""
     try:
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(DEFAULT_CONFIG_PATH), exist_ok=True)
-        
-        with open(DEFAULT_CONFIG_PATH, 'w') as f:
-            json.dump(config, f, indent=2)
-        logger.info(f"Saved config to {DEFAULT_CONFIG_PATH}")
-        return True
-    except Exception as e:
-        logger.error(f"Error saving config: {str(e)}")
-        return False
+        response = requests.get(f"{API_URL}/mcp-tools", timeout=5)
+        if response.status_code == 200:
+            return response.json().get("registered_tools", [])
+        else:
+            return []
+    except requests.exceptions.RequestException:
+        return []
 
-# Load initial configuration
-config = load_config()
+def display_json_preview(json_data):
+    """Display a formatted preview of JSON data"""
+    st.code(json.dumps(json_data, indent=2), language="json")
 
-@mcp.tool()
-def configure_smtp(smtp_server: str = "", smtp_port: int = 0, 
-                  use_tls: bool = True, email: str = "", password: str = "") -> str:
-    """
-    Configure SMTP server settings for sending emails.
-    
-    Args:
-        smtp_server: SMTP server hostname (e.g., smtp.gmail.com)
-        smtp_port: SMTP server port (e.g., 587 for TLS, 465 for SSL)
-        use_tls: Whether to use TLS encryption
-        email: Email address to send from
-        password: Email password or app password
-        
-    Returns:
-        A confirmation message
-    """
-    global config
-    
-    # Only update values that were provided
-    if smtp_server:
-        config["smtp_server"] = smtp_server
-    if smtp_port:
-        config["smtp_port"] = smtp_port
-    if email:
-        config["email"] = email
-    if password:
-        config["password"] = password
-    
-    config["use_tls"] = use_tls
-    
-    # Save the updated configuration
-    if save_config(config):
-        return f"SMTP configuration updated successfully. Server: {config['smtp_server']}, Port: {config['smtp_port']}, Email: {config['email']}"
+def display_result(success, data, error_message=None):
+    """Display API call results with appropriate styling"""
+    if success:
+        st.markdown('<div class="success-box">', unsafe_allow_html=True)
+        st.markdown("#### ✅ Success!")
+        if isinstance(data, dict):
+            display_json_preview(data)
+        else:
+            st.write(data)
+        st.markdown('</div>', unsafe_allow_html=True)
     else:
-        return "Failed to save SMTP configuration."
+        st.markdown('<div class="error-box">', unsafe_allow_html=True)
+        st.markdown("#### ❌ Error")
+        if error_message:
+            st.write(error_message)
+        if data:
+            if isinstance(data, dict):
+                display_json_preview(data)
+            else:
+                st.write(data)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-@mcp.tool()
-def test_smtp_connection() -> str:
-    """
-    Test the SMTP server connection with configured settings.
-    
-    Returns:
-        A success or error message
-    """
+def parse_numeric_data(uploaded_file):
+    """Parse numeric data from uploaded file (JSON or CSV)"""
     try:
-        # Create an SMTP connection
-        smtp_conn = smtplib.SMTP(config["smtp_server"], config["smtp_port"])
+        # Get file extension
+        file_extension = uploaded_file.name.split('.')[-1].lower()
         
-        # Start TLS if configured
-        if config["use_tls"]:
-            smtp_conn.starttls()
-        
-        # Login if credentials are provided
-        if config["email"] and config["password"]:
-            smtp_conn.login(config["email"], config["password"])
-        
-        # Quit the connection
-        smtp_conn.quit()
-        
-        return f"Successfully connected to SMTP server: {config['smtp_server']}:{config['smtp_port']}"
-    except Exception as e:
-        logger.error(f"SMTP connection test failed: {str(e)}")
-        return f"Failed to connect to SMTP server: {str(e)}"
-
-@mcp.tool()
-def send_email(to: str, subject: str, body: str, html_body: str = "", cc: str = "", bcc: str = "") -> str:
-    """
-    Send an email using the configured SMTP settings.
-    
-    Args:
-        to: Recipient email address(es), comma-separated for multiple
-        subject: Email subject line
-        body: Plain text email body
-        html_body: Optional HTML email body
-        cc: Optional CC recipients, comma-separated
-        bcc: Optional BCC recipients, comma-separated
-        
-    Returns:
-        A success or error message
-    """
-    # Verify configuration
-    if not config["smtp_server"] or not config["email"] or not config["password"]:
-        return "SMTP is not fully configured. Use configure_smtp tool first."
-    
-    try:
-        # Create message
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = config["email"]
-        msg["To"] = to
-        
-        if cc:
-            msg["Cc"] = cc
-        if bcc:
-            msg["Bcc"] = bcc
-        
-        # Add plain text body
-        msg.attach(MIMEText(body, "plain"))
-        
-        # Add HTML body if provided
-        if html_body:
-            msg.attach(MIMEText(html_body, "html"))
-        
-        # Determine all recipients
-        all_recipients = [addr.strip() for addr in to.split(",")]
-        if cc:
-            all_recipients.extend([addr.strip() for addr in cc.split(",")])
-        if bcc:
-            all_recipients.extend([addr.strip() for addr in bcc.split(",")])
-        
-        # Connect to SMTP server
-        with smtplib.SMTP(config["smtp_server"], config["smtp_port"]) as smtp_conn:
-            if config["use_tls"]:
-                smtp_conn.starttls()
+        if file_extension == 'json':
+            # Parse JSON file
+            data = json.load(uploaded_file)
+            return True, data, None
+        elif file_extension == 'csv':
+            # Parse CSV file
+            df = pd.read_csv(uploaded_file)
             
-            smtp_conn.login(config["email"], config["password"])
-            smtp_conn.send_message(msg)
-        
-        logger.info(f"Email sent to {to}")
-        return f"Email sent successfully to {to}"
-    
+            # Convert DataFrame to dictionary format expected by the analyze tool
+            data_dict = {}
+            for column in df.columns:
+                # Only include numeric columns
+                if pd.api.types.is_numeric_dtype(df[column]):
+                    data_dict[column] = df[column].tolist()
+            
+            if not data_dict:
+                return False, None, "No numeric columns found in the CSV file."
+            
+            return True, data_dict, None
+        else:
+            return False, None, f"Unsupported file extension: {file_extension}. Please upload a JSON or CSV file."
     except Exception as e:
-        logger.error(f"Failed to send email: {str(e)}")
-        return f"Failed to send email: {str(e)}"
+        return False, None, f"Error parsing file: {str(e)}"
 
-@mcp.tool()
-def get_smtp_config() -> str:
-    """
-    Get the current SMTP configuration (excludes password).
+def visualize_analysis_results(data, operation):
+    """Create visualizations based on the analysis results"""
+    if not data or "status" not in data or data["status"] != "success":
+        return
     
-    Returns:
-        Current SMTP configuration as a string
-    """
-    # Create a copy without the password for security
-    safe_config = config.copy()
-    safe_config["password"] = "********" if safe_config["password"] else ""
+    result = data.get("result")
     
-    return json.dumps(safe_config, indent=2)
-
-if __name__ == "__main__":
-    logger.info(f"SMTP MCP Server initialized with config: {config['smtp_server']}:{config['smtp_port']}")
-    
-    # If no email is configured, log a warning
-    if not config["email"] or not config["password"]:
-        logger.warning("SMTP credentials not configured. Use configure_smtp tool to set up.")
-    
-    # Command-line arguments for transport control
-    parser = argparse.ArgumentParser(description='Run SMTP MCP Server')
-    parser.add_argument('--host', default='0.0.0.0', help='Host to bind to (for HTTP transport)')
-    parser.add_argument('--port', type=int, default=5000, help='Port to listen on (for HTTP transport)')
-    parser.add_argument('--transport', choices=['stdio', 'http'], default='stdio',
-                      help='Transport protocol to use (stdio or http)')
-    
-    args = parser.parse_args()
-    
-    # Run the MCP server using the specified transport
-    if args.transport == 'http':
-        logger.info(f"Starting MCP server with HTTP transport on {args.host}:{args.port}")
-        mcp.run(transport='http', host=args.host, port=args.port)
+    if isinstance(result, dict):
+        # Multiple columns/series
+        df = pd.DataFrame({"Category": list(result.keys()), "Value": list(result.values())})
+        
+        # Create bar chart
+        fig = px.bar(
+            df, 
+            x="Category", 
+            y="Value", 
+            title=f"{operation.capitalize()} Values by Category",
+            labels={"Value": operation.capitalize()},
+            color="Category"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Create table
+        st.dataframe(df, use_container_width=True)
     else:
-        logger.info("Starting MCP server with stdio transport")
-        mcp.run(transport='stdio')
+        # Single value result - show as big number with caption
+        st.metric(label=f"{operation.capitalize()} Value", value=f"{result:.4f}")
+
+# --- Sidebar ---
+st.sidebar.markdown('<h1 class="main-header">MCP Data Utility Tools</h1>', unsafe_allow_html=True)
+st.sidebar.markdown("---")
+
+# Check API health
+api_ok, api_message = check_api_health()
+if api_ok:
+    st.sidebar.success("✅ API is online")
+else:
+    st.sidebar.error(f"❌ API is offline: {api_message.get('error', 'Unknown error')}")
+
+# Navigation
+tool_options = [
+    "Data Analyzer",
+    "Calculator",
+    "Weather Forecast",
+    "Email Sender",
+    "HEDIS Text-to-SQL",
+    "HEDIS Document Search"
+]
+
+selected_tool = st.sidebar.radio("Select Tool", tool_options)
+
+st.sidebar.markdown("---")
+st.sidebar.info("""
+This application provides a user interface for the MCP Data Utility Tools API. 
+Select a tool from the menu to get started.
+""")
+
+# --- Main Content ---
+st.markdown(f'<h1 class="tool-header">{selected_tool}</h1>', unsafe_allow_html=True)
+
+# === Data Analyzer Tool ===
+if selected_tool == "Data Analyzer":
+    st.markdown('<p class="tool-description">Upload JSON or CSV data files and perform statistical analysis.</p>', unsafe_allow_html=True)
+    
+    # File uploader
+    uploaded_file = st.file_uploader("Upload a JSON or CSV file", type=["json", "csv"])
+    
+    if uploaded_file is not None:
+        # Parse the uploaded file
+        success, data, error_message = parse_numeric_data(uploaded_file)
+        
+        if success:
+            st.markdown('<div class="info-box">', unsafe_allow_html=True)
+            st.markdown("#### 📄 Parsed Data Preview")
+            display_json_preview(data)
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            # Operation selection
+            operation = st.selectbox(
+                "Select statistical operation",
+                ["mean", "median", "sum", "min", "max"]
+            )
+            
+            # Submit button
+            if st.button("Analyze Data"):
+                with st.spinner("Analyzing data..."):
+                    try:
+                        # Call the analyze endpoint
+                        response = requests.post(
+                            f"{API_URL}/analyze",
+                            json={"data": data, "operation": operation},
+                            timeout=DEFAULT_TIMEOUT
+                        )
+                        
+                        if response.status_code == 200:
+                            result_data = response.json()
+                            display_result(True, result_data)
+                            
+                            # Visualize the results
+                            st.markdown("### Visualization")
+                            visualize_analysis_results(result_data, operation)
+                        else:
+                            display_result(False, response.json(), f"API returned status code {response.status_code}")
+                    except requests.exceptions.RequestException as e:
+                        display_result(False, None, f"API request failed: {str(e)}")
+        else:
+            display_result(False, None, error_message)
+
+# === Calculator Tool ===
+elif selected_tool == "Calculator":
+    st.markdown('<p class="tool-description">Evaluate arithmetic expressions safely.</p>', unsafe_allow_html=True)
+    
+    expression = st.text_input("Enter arithmetic expression", placeholder="e.g., (5 + 10) * 2")
+    
+    if st.button("Calculate") and expression:
+        with st.spinner("Calculating..."):
+            try:
+                # Call the calculator endpoint
+                response = requests.post(
+                    f"{API_URL}/calculate",
+                    json={"expression": expression},
+                    timeout=DEFAULT_TIMEOUT
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    display_result(True, result)
+                else:
+                    display_result(False, response.json(), f"API returned status code {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                display_result(False, None, f"API request failed: {str(e)}")
+
+# === Weather Forecast Tool ===
+elif selected_tool == "Weather Forecast":
+    st.markdown('<p class="tool-description">Get current weather forecasts for any location.</p>', unsafe_allow_html=True)
+    
+    place = st.text_input("Enter location", placeholder="e.g., New York, NY")
+    
+    if st.button("Get Weather") and place:
+        with st.spinner(f"Getting weather for {place}..."):
+            try:
+                # Call the weather endpoint
+                response = requests.post(
+                    f"{API_URL}/get_weather",
+                    json={"place": place},
+                    timeout=DEFAULT_TIMEOUT
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    
+                    # Check if result is a string or dict
+                    if isinstance(result, str):
+                        display_result(True, result)
+                    else:
+                        display_result(True, result)
+                else:
+                    display_result(False, response.json(), f"API returned status code {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                display_result(False, None, f"API request failed: {str(e)}")
+
+# === Email Sender Tool ===
+elif selected_tool == "Email Sender":
+    st.markdown('<p class="tool-description">Send emails to multiple recipients.</p>', unsafe_allow_html=True)
+    
+    subject = st.text_input("Subject", placeholder="e.g., Meeting Reminder")
+    receivers = st.text_input("Recipients (comma-separated)", placeholder="e.g., user1@example.com, user2@example.com")
+    
+    # Email body with rich text editor
+    st.write("Email Body:")
+    body = st.text_area("", height=200, placeholder="Enter email content here...")
+    
+    if st.button("Send Email") and subject and receivers and body:
+        with st.spinner("Sending email..."):
+            try:
+                # Call the email endpoint
+                response = requests.post(
+                    f"{API_URL}/send_test_email",
+                    json={"subject": subject, "body": body, "receivers": receivers},
+                    timeout=DEFAULT_TIMEOUT
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get("status") == "success":
+                        display_result(True, result)
+                    else:
+                        display_result(False, result, "Email could not be sent")
+                else:
+                    display_result(False, response.json(), f"API returned status code {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                display_result(False, None, f"API request failed: {str(e)}")
+
+# === HEDIS Text-to-SQL Tool ===
+elif selected_tool == "HEDIS Text-to-SQL":
+    st.markdown('<p class="tool-description">Convert natural language queries to SQL for HEDIS datasets.</p>', unsafe_allow_html=True)
+    
+    prompt = st.text_area("Enter your question about HEDIS codes", 
+                         placeholder="e.g., What are the codes in Breast Cancer Value Set?", 
+                         height=100)
+    
+    if st.button("Generate SQL") and prompt:
+        with st.spinner("Converting to SQL..."):
+            try:
+                # Call the text2sql endpoint
+                response = requests.post(
+                    f"{API_URL}/DFWAnalyst",
+                    json={"prompt": prompt},
+                    timeout=DEFAULT_TIMEOUT
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    
+                    # Extract SQL if available
+                    sql = None
+                    if isinstance(result, dict) and "message" in result:
+                        message = result["message"]
+                        if isinstance(message, dict) and "content" in message:
+                            for content_item in message["content"]:
+                                if content_item.get("type") == "sql":
+                                    sql = content_item.get("statement")
+                    
+                    if sql:
+                        st.markdown("### Generated SQL")
+                        st.code(sql, language="sql")
+                    
+                    display_result(True, result)
+                else:
+                    display_result(False, response.json(), f"API returned status code {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                display_result(False, None, f"API request failed: {str(e)}")
+
+# === HEDIS Document Search Tool ===
+elif selected_tool == "HEDIS Document Search":
+    st.markdown('<p class="tool-description">Search HEDIS measure specification documents for relevant information.</p>', unsafe_allow_html=True)
+    
+    query = st.text_area("Enter your search query", 
+                        placeholder="e.g., What is the age criteria for BCS Measure?", 
+                        height=100)
+    
+    if st.button("Search") and query:
+        with st.spinner("Searching HEDIS documents..."):
+            try:
+                # Call the search endpoint
+                response = requests.post(
+                    f"{API_URL}/DFWSearch",
+                    json={"query": query},
+                    timeout=DEFAULT_TIMEOUT
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    
+                    # Extract and display search results in a more readable format
+                    if isinstance(result, dict) and "results" in result:
+                        st.markdown("### Search Results")
+                        
+                        for i, item in enumerate(result["results"]):
+                            st.markdown(f"**Result {i+1}**")
+                            
+                            if "chunk" in item:
+                                st.markdown(item["chunk"])
+                            else:
+                                display_json_preview(item)
+                            
+                            st.markdown("---")
+                    
+                    display_result(True, result)
+                else:
+                    display_result(False, response.json(), f"API returned status code {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                display_result(False, None, f"API request failed: {str(e)}")
+
+# --- Footer ---
+st.markdown("---")
+st.markdown("""
+<div style="text-align: center; color: #777;">
+    MCP Data Utility Tools Client • {0}
+</div>
+""".format(datetime.now().year), unsafe_allow_html=True)
