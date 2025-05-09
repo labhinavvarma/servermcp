@@ -2,74 +2,62 @@ import streamlit as st
 import asyncio
 import nest_asyncio
 import json
-import yaml
 
 from mcp.client.sse import sse_client
 from mcp import ClientSession
-from langchain.tools import tool
-from langchain.agents import initialize_agent, AgentType
-from langchain.chat_models import ChatOpenAI  # Placeholder, won't be used
-from langchain.agents.agent_toolkits import Tool
-from langchain.agents import AgentExecutor
-from langchain.memory import ConversationBufferMemory
+from mcp.client.client import ToolResult
+from mcp.client.multi import MultiServerMCPClient
 
 nest_asyncio.apply()
-st.set_page_config(page_title="Mock MCP Client", page_icon="🧪")
-st.title("🧪 Mock MCP Client: Calculator + Analyzer")
+st.set_page_config(page_title="MCP Tool Client", page_icon="🛠️")
+st.title("🛠️ MCP Tool Client: Calculator + Analyzer")
 
 # === MCP Server URL ===
 server_url = st.sidebar.text_input("MCP Server URL", "http://localhost:8000/sse")
-mode = st.sidebar.radio("Mode", ["Calculator", "JSON Analyzer"], horizontal=True)
+mode = st.sidebar.radio("Select Mode", ["Calculator", "JSON Analyzer"], horizontal=True)
 
-# === Mock LLM Response ===
-class MockLLM:
-    def __init__(self):
-        self.history = []
-
-    async def ainvoke(self, input_dict):
-        messages = input_dict.get("messages", "")
-        return {"mock_response": (None, type("Resp", (), {"content": f"Mock LLM received: {messages}"})())}
-
-# === MCP Tool Invocation ===
-async def call_tool(tool_name, args):
+# === Core Tool Call Function ===
+async def call_mcp_tool(tool_name: str, arguments: dict):
     async with MultiServerMCPClient(
-        {"MockServer": {"url": server_url, "transport": "sse"}}
+        {"MCPServer": {"url": server_url, "transport": "sse"}}
     ) as client:
-        result = await client.call_tool("MockServer", tool_name=tool_name, arguments=args)
+        result: ToolResult = await client.call_tool("MCPServer", tool_name, arguments)
         return result.content[0].json()
 
-# === Calculator Mode ===
+# === Calculator UI ===
 if mode == "Calculator":
-    expr = st.text_input("Enter an arithmetic expression (e.g., 3+5*2):")
+    st.subheader("🔢 Calculator Tool")
+    expr = st.text_input("Enter Expression (e.g., 3+4*2):")
     if st.button("Evaluate"):
         try:
-            result = asyncio.run(call_tool("calculator", {"expression": expr}))
-            st.success(f"✅ {result}")
+            output = asyncio.run(call_mcp_tool("calculator", {"expression": expr}))
+            st.success("✅ Result")
+            st.code(str(output))
         except Exception as e:
             st.error(f"❌ Error: {e}")
 
-# === Analyzer Mode ===
+# === JSON Analyzer UI ===
 elif mode == "JSON Analyzer":
-    st.subheader("📊 Upload JSON for Analysis")
-    uploaded_file = st.file_uploader("Upload JSON", type=["json"])
-    operation = st.selectbox("Operation", ["sum", "mean", "median", "min", "max", "average"])
+    st.subheader("📊 Analyze JSON Data")
+    uploaded_file = st.file_uploader("Upload JSON File", type=["json"])
+    operation = st.selectbox("Select Operation", ["sum", "mean", "median", "min", "max", "average"])
 
     if uploaded_file:
         try:
             json_data = json.load(uploaded_file)
             st.code(json.dumps(json_data, indent=2), language="json")
-            if st.button("Analyze"):
+            if st.button("Run Analysis"):
                 try:
-                    result = asyncio.run(call_tool("analyze", {
+                    output = asyncio.run(call_mcp_tool("analyze", {
                         "data": json_data,
                         "operation": operation
                     }))
-                    st.success("✅ Result:")
-                    st.code(json.dumps(result, indent=2))
+                    st.success("✅ Analysis Output")
+                    st.code(json.dumps(output, indent=2))
                 except Exception as e:
-                    st.error(f"❌ Error during analysis: {e}")
+                    st.error(f"❌ MCP Tool Error: {e}")
         except Exception as e:
-            st.error(f"❌ Invalid JSON file: {e}")
+            st.error(f"❌ Invalid JSON: {e}")
 
 st.sidebar.markdown("---")
-st.sidebar.caption("MCP Client (Mock Mode)")
+st.sidebar.caption("📡 MCP Client (No LangGraph)")
