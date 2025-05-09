@@ -1,10 +1,11 @@
 from atlassian import Confluence
 from fastmcp import FastMCP
 from pydantic import BaseModel
+import requests
 
 # === Hardcoded Configuration ===
 BASE_URL = "https://confluence.elevancehealth.com"
-PAT = ""
+PAT = 
 
 # === Initialize Confluence client with PAT ===
 confluence = Confluence(
@@ -28,11 +29,24 @@ def test_confluence_connection() -> dict:
     Test the Confluence connection using the provided PAT.
     """
     try:
-        user_info = confluence.get_current_user()
-        return {
-            "status": "success",
-            "message": f"Connected as {user_info.get('displayName', 'Unknown User')}."
+        # Direct REST API call to get current user
+        url = f"{BASE_URL}/rest/api/user/current"
+        headers = {
+            "Authorization": f"Bearer {PAT}",
+            "Accept": "application/json"
         }
+        response = requests.get(url, headers=headers, verify=False)  # Set verify=True in production
+        if response.status_code == 200:
+            user_info = response.json()
+            return {
+                "status": "success",
+                "message": f"Connected as {user_info.get('displayName', 'Unknown User')}."
+            }
+        else:
+            return {
+                "status": "failure",
+                "message": f"Connection failed: {response.status_code} {response.text}"
+            }
     except Exception as e:
         return {
             "status": "failure",
