@@ -6,50 +6,17 @@ import asyncio
 import nest_asyncio
 import yaml
 import re
-from functools import partial
 from mcp.client.sse import sse_client
 from mcp import ClientSession
 
-# === Initial Setup ===
+# Apply nest_asyncio for running async code
 nest_asyncio.apply()
-st.set_page_config(
-    page_title="Cortex + MCP Chat", 
-    page_icon="🤖",
-    layout="wide"
-)
 
-# === Styling ===
-st.markdown("""
-<style>
-    .main-title {
-        text-align: center;
-        color: #4B61D1;
-        margin-bottom: 20px;
-    }
-    .chat-message {
-        padding: 15px;
-        border-radius: 10px;
-        margin-bottom: 10px;
-    }
-    .user-message {
-        background-color: #E8F0FE;
-    }
-    .assistant-message {
-        background-color: #F0F2F6;
-    }
-    .tool-callout {
-        background-color: #FFEBCE;
-        padding: 10px;
-        border-left: 4px solid #FF9900;
-        margin: 10px 0;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Basic page config
+st.set_page_config(page_title="Cortex + MCP Chat", page_icon="🤖")
+st.title("🤖 Cortex + MCP Chatbot")
 
-# === Page Header ===
-st.markdown("<h1 class='main-title'>🤖 Cortex + MCP Integrated Chatbot</h1>", unsafe_allow_html=True)
-
-# === Cortex LLM Config ===
+# Cortex LLM Config
 API_URL = "https://sfassist.edagenaidev.awsdns.internal.das/api/cortex/complete"
 API_KEY = "78a799ea-a0f6-11ef-a0ce-15a449f7a8b0"
 APP_ID = "edadip"
@@ -62,95 +29,104 @@ For data analysis, use the 'analyze' tool.
 For sending emails, use the 'mcp-send-email' tool.
 When you use a tool, clearly indicate which tool you're using and the results."""
 
-# === Session State ===
+# Session State initialization
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "context_window" not in st.session_state:
     st.session_state.context_window = []
-if "yaml_models" not in st.session_state:
-    st.session_state.yaml_models = {}
 if "mcp_info" not in st.session_state:
-    st.session_state.mcp_info = {"resources": [], "tools": [], "prompts": [], "yaml": []}
+    st.session_state.mcp_info = {"resources": [], "tools": [], "prompts": []}
 if "uploaded_json" not in st.session_state:
     st.session_state.uploaded_json = None
 if "available_tools" not in st.session_state:
     st.session_state.available_tools = {}
 
-# === MCP Server Settings ===
-col1, col2 = st.columns([3, 1])
-with col1:
-    server_url = st.text_input("MCP Server URL", "http://localhost:8000/sse", help="The URL of your MCP server")
-with col2:
-    if st.button("🔍 Connect to MCP", help="Connect to the MCP server and load available tools"):
-        progress_placeholder = st.empty()
-        progress_placeholder.info("Connecting to MCP server...")
-        # Initialize MCP connection and fetch available tools
-        asyncio.run(fetch_mcp_info(server_url, progress_placeholder))
+# MCP Server URL input
+server_url = st.text_input("MCP Server URL", "http://localhost:8000/sse")
 
-# === JSON File Upload ===
-uploaded_file = st.file_uploader("📂 Upload JSON for Analysis", type=["json"])
+# Connect to MCP button
+if st.button("Connect to MCP"):
+    status_text = st.empty()
+    status_text.text("Connecting to MCP server...")
+    
+    # Define async function to fetch MCP info
+    async def fetch_mcp_info():
+        result = {"resources": [], "tools": [], "prompts": []}
+        try:
+            async with sse_client(server_url) as sse_connection:
+                async with ClientSession(*sse_connection) as session:
+                    await session.initialize()
+                    
+                    # Fetch Tools
+                    status_text.text("Loading MCP tools...")
+                    tools = await session.list_tools()
+                    if hasattr(tools, 'tools'):
+                        for t in tools.tools:
+                            tool_name = t.name
+                            tool_desc = getattr(t, 'description', 'No description')
+                            result["tools"].append({
+                                "name": tool_name, 
+                                "description": tool_desc
+                            })
+                            st.session_state.available_tools[tool_name] = {
+                                "description": tool_desc
+                            }
+                    
+                    # Fetch Resources
+                    status_text.text("Loading MCP resources...")
+                    resources = await session.list_resources()
+                    if hasattr(resources, 'resources'):
+                        for r in resources.resources:
+                            result["resources"].append({
+                                "name": r.name, 
+                                "description": r.description if hasattr(r, 'description') else "No description"
+                            })
+                    
+                    # Fetch Prompts
+                    status_text.text("Loading MCP prompts...")
+                    prompts = await session.list_prompts()
+                    if hasattr(prompts, 'prompts'):
+                        for p in prompts.prompts:
+                            args = [
+                                f"{arg.name} ({'Required' if arg.required else 'Optional'}): {arg.description}"
+                                for arg in getattr(p, 'arguments', [])
+                            ]
+                            result["prompts"].append({
+                                "name": p.name,
+                                "description": getattr(p, 'description', ''),
+                                "args": args
+                            })
+                    
+                    status_text.text("Connected to MCP server successfully!")
+            
+            st.session_state.mcp_info = result
+            return "Connected successfully!"
+        except Exception as e:
+            status_text.text(f"MCP Connection Error: {e}")
+            return f"Error: {e}"
+    
+    # Run the async function
+    result = asyncio.run(fetch_mcp_info())
+    status_text.text(result)
+
+# JSON File Upload
+uploaded_file = st.file_uploader("Upload JSON for Analysis", type=["json"])
 if uploaded_file:
     try:
         st.session_state.uploaded_json = json.load(uploaded_file)
-        st.success("✅ JSON loaded successfully!")
+        st.success("JSON loaded successfully!")
     except Exception as e:
-        st.error(f"❌ Failed to parse JSON: {e}")
+        st.error(f"Failed to parse JSON: {e}")
 
-# === MCP Metadata Fetch ===
-async def fetch_mcp_info(server_url, progress_placeholder):
-    result = {"resources": [], "tools": [], "prompts": [], "yaml": []}
-    try:
-        async with sse_client(server_url) as sse_connection:
-            async with ClientSession(*sse_connection) as session:
-                await session.initialize()
-                
-                # Fetch Tools
-                progress_placeholder.info("Loading MCP tools...")
-                tools = await session.list_tools()
-                if hasattr(tools, 'tools'):
-                    for t in tools.tools:
-                        tool_name = t.name
-                        tool_desc = getattr(t, 'description', 'No description')
-                        result["tools"].append({
-                            "name": tool_name, 
-                            "description": tool_desc
-                        })
-                        st.session_state.available_tools[tool_name] = {
-                            "description": tool_desc
-                        }
-                
-                # Fetch Resources
-                progress_placeholder.info("Loading MCP resources...")
-                resources = await session.list_resources()
-                if hasattr(resources, 'resources'):
-                    for r in resources.resources:
-                        result["resources"].append({
-                            "name": r.name, 
-                            "description": r.description if hasattr(r, 'description') else "No description"
-                        })
-                
-                # Fetch Prompts
-                progress_placeholder.info("Loading MCP prompts...")
-                prompts = await session.list_prompts()
-                if hasattr(prompts, 'prompts'):
-                    for p in prompts.prompts:
-                        args = [
-                            f"{arg.name} ({'Required' if arg.required else 'Optional'}): {arg.description}"
-                            for arg in getattr(p, 'arguments', [])
-                        ]
-                        result["prompts"].append({
-                            "name": p.name,
-                            "description": getattr(p, 'description', ''),
-                            "args": args
-                        })
-                
-                progress_placeholder.success("✅ Connected to MCP server successfully!")
-        
-        st.session_state.mcp_info = result
-    except Exception as e:
-        progress_placeholder.error(f"❌ MCP Connection Error: {e}")
+# Display Available Tools
+st.subheader("Available MCP Tools")
+if st.session_state.available_tools:
+    for tool_name, tool_info in st.session_state.available_tools.items():
+        st.text(f"{tool_name}: {tool_info['description']}")
+else:
+    st.info("No tools loaded. Connect to the MCP server to load available tools.")
 
-# === Tool Execution ===
+# Tool Execution Functions
 async def execute_tool(tool_name, args):
     try:
         async with sse_client(server_url) as sse_connection:
@@ -159,20 +135,20 @@ async def execute_tool(tool_name, args):
                 result = await session.call_tool(tool_name, args)
                 return result.content[0].text if hasattr(result, 'content') else "No content returned"
     except Exception as e:
-        return f"❌ Tool Error: {str(e)}"
+        return f"Tool Error: {str(e)}"
 
-# === Calculator Tool ===
+# Calculator Tool
 async def run_calculator(expression):
     return await execute_tool("calculator", {"expression": expression})
 
-# === Analyze Tool ===
+# Analyze Tool
 async def run_analyze(data, operation):
     return await execute_tool("analyze", {
         "data": data,
         "operation": operation
     })
 
-# === Email Tool ===
+# Email Tool
 async def send_email(subject, body, receivers):
     # Convert receivers to list if it's a string
     if isinstance(receivers, str):
@@ -184,7 +160,7 @@ async def send_email(subject, body, receivers):
         "receivers": receivers
     })
 
-# === Detect Tool Intent ===
+# Detect Tool Intent
 def detect_tool_intent(text):
     # Check for calculator intent
     if re.search(r'calculate|compute|evaluate|math|equation|formula|[+\-*/^√()]', text, re.IGNORECASE):
@@ -243,7 +219,7 @@ def detect_tool_intent(text):
     # No tool intent detected
     return None
 
-# === Process User Message ===
+# Process User Message
 async def process_user_message(user_message):
     # Check if the message indicates a tool should be used
     tool_intent = detect_tool_intent(user_message)
@@ -274,7 +250,7 @@ async def process_user_message(user_message):
     # Fall back to LLM if no tool intent is detected or no tool is available
     return call_cortex_llm(user_message, st.session_state.context_window)
 
-# === Cortex LLM Request ===
+# Cortex LLM Request
 def call_cortex_llm(text, context_window):
     session_id = str(uuid.uuid4())
     
@@ -323,62 +299,45 @@ def call_cortex_llm(text, context_window):
                 return answer.strip()
             return raw.strip()
         else:
-            return f"❌ Cortex Error {response.status_code}: {response.text}"
+            return f"Cortex Error {response.status_code}: {response.text}"
     except Exception as e:
-        return f"❌ Cortex Exception: {str(e)}"
+        return f"Cortex Exception: {str(e)}"
 
-# === Display Available Tools ===
-with st.expander("🧰 Available MCP Tools"):
-    if st.session_state.available_tools:
-        for tool_name, tool_info in st.session_state.available_tools.items():
-            st.markdown(f"**{tool_name}**: {tool_info['description']}")
+# Chat Display
+st.subheader("Chat")
+for msg in st.session_state.messages:
+    if msg["role"] == "user":
+        st.text_input("User:", msg["content"], disabled=True)
     else:
-        st.info("No tools loaded. Connect to the MCP server to load available tools.")
+        st.text_area("Assistant:", msg["content"], height=200, disabled=True)
 
-# === Chat Display ===
-st.markdown("### 💬 Chat")
-chat_container = st.container()
+# Chat Input
+query = st.text_input("Ask me anything or request tool usage:")
+send_button = st.button("Send")
 
-with chat_container:
-    for msg in st.session_state.messages:
-        role_class = "user-message" if msg["role"] == "user" else "assistant-message"
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-# === Chat Input ===
-query = st.chat_input("Ask me anything or request tool usage...")
-
-if query:
+if query and send_button:
     # Add user message to chat
     st.session_state.messages.append({"role": "user", "content": query})
     
-    # Display the messages
-    with st.chat_message("user"):
-        st.markdown(query)
+    # Process user message
+    status_text = st.empty()
+    status_text.text("Thinking...")
     
-    # Set up the placeholder for the assistant's response
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        message_placeholder.info("🤔 Thinking...")
-        
-        # Process the message and detect tool usage
-        response = asyncio.run(process_user_message(query))
-        
-        # Update the placeholder with the response
-        message_placeholder.markdown(response)
+    # Process the message and detect tool usage
+    response = asyncio.run(process_user_message(query))
+    status_text.empty()
     
     # Save the assistant's response
     st.session_state.messages.append({"role": "assistant", "content": response})
     
     # Update context window for future messages
     st.session_state.context_window.append(f"User: {query}\nBot: {response}")
+    
+    # Refresh the page to show the new messages
+    st.experimental_rerun()
 
-# === Clear Chat Button ===
-if st.button("🧹 Clear Chat"):
+# Clear Chat Button
+if st.button("Clear Chat"):
     st.session_state.messages = []
     st.session_state.context_window = []
     st.experimental_rerun()
-
-# === Footer ===
-st.markdown("---")
-st.markdown("Powered by Cortex + MCP | © 2025")
