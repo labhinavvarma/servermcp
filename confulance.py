@@ -1,14 +1,14 @@
 from fastmcp import FastMCP
 from pydantic import BaseModel
-import requests
 from atlassian import Confluence
+import requests
 
 # === Hardcoded Configuration ===
 BASE_URL = "https://confluence.elevancehealth.com"
 PAT = 
 
 # === Initialize FastMCP server ===
-mcp = FastMCP("Confluence MCP Server")
+mcp = FastMCP("Confluence MCP Server", port=8000)
 
 # === Initialize Confluence client with PAT ===
 confluence = Confluence(
@@ -51,20 +51,12 @@ def search_confluence(input: SearchInput) -> list:
         return [{"error": str(e)}]
 
 # === Resource: Expose Confluence content ===
-@mcp.resource()
-def confluence_resource(uri: str) -> dict:
+@mcp.resource(uri="confluence://{space_key}/{page_title}", name="confluence_page", description="Access Confluence page content by space and title")
+def get_confluence_page(space_key: str, page_title: str) -> dict:
     """
-    Expose Confluence content as an MCP resource.
-    URI format: confluence://<space_key>/<page_title>
+    Retrieve a Confluence page by space key and title.
     """
     try:
-        if not uri.startswith("confluence://"):
-            return {"error": "Invalid URI scheme."}
-        path = uri[len("confluence://"):]
-        parts = path.split("/", 1)
-        if len(parts) != 2:
-            return {"error": "Invalid URI format. Expected confluence://<space_key>/<page_title>"}
-        space_key, page_title = parts
         # Fetch the page by title
         page = confluence.get_page_by_title(space=space_key, title=page_title)
         if page:
