@@ -110,6 +110,23 @@ with st.sidebar.expander("📦 Resources"):
 with st.sidebar.expander("🛠 Tools"):
     for t in st.session_state.mcp_info["tools"]:
         st.markdown(f"**{t['name']}**\n\n{t['description']}")
+        if st.button(f"▶️ Run {t['name']}", key=f"run_{t['name']}"):
+            async def run_tool(name):
+                try:
+                    async with sse_client(server_url) as sse_connection:
+                        async with ClientSession(*sse_connection) as session:
+                            await session.initialize()
+                            result = await session.call_tool(name, {})
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": f"🛠️ Tool `{name}` executed:\n\n{result.content[0].text}"
+                            })
+                except Exception as e:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": f"❌ Tool `{name}` error: {str(e)}"
+                    })
+            asyncio.run(run_tool(t['name']))
 
 with st.sidebar.expander("🧠 Prompts"):
     for p in st.session_state.mcp_info["prompts"]:
