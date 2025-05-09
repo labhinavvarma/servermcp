@@ -1,11 +1,14 @@
-from atlassian import Confluence
 from fastmcp import FastMCP
 from pydantic import BaseModel
 import requests
+from atlassian import Confluence
 
 # === Hardcoded Configuration ===
 BASE_URL = "https://confluence.elevancehealth.com"
 PAT = 
+
+# === Initialize FastMCP server ===
+mcp = FastMCP("Confluence MCP Server")
 
 # === Initialize Confluence client with PAT ===
 confluence = Confluence(
@@ -14,75 +17,38 @@ confluence = Confluence(
     verify_ssl=True  # Set to False if using self-signed certificates
 )
 
-# === Initialize FastMCP server ===
-mcp = FastMCP("Confluence MCP Server")
+# === Define input model for search tool ===
+class SearchInput(BaseModel):
+    query: str
+    limit: int = 10
 
-# === Define input model for get_page tool ===
-class PageInput(BaseModel):
-    space_key: str
-    page_title: str
-
-# === Tool: Test Confluence connection ===
+# === Tool: Search Confluence content ===
 @mcp.tool()
-def test_confluence_connection() -> dict:
+def search_confluence(input: SearchInput) -> list:
     """
-    Test the Confluence connection using the provided PAT.
+    Search Confluence content using CQL.
     """
     try:
-        # Direct REST API call to get current user
-        url = f"{BASE_URL}/rest/api/user/current"
+        cql_query = f'text~"{input.query}"'
+        url = f"{BASE_URL}/rest/api/search?cql={cql_query}&limit={input.limit}"
         headers = {
             "Authorization": f"Bearer {PAT}",
             "Accept": "application/json"
         }
-        response = requests.get(url, headers=headers, verify=True)  # Set verify=False if using self-signed certificates
+        response = requests.get(url, headers=headers, verify=True)
         if response.status_code == 200:
-            user_info = response.json()
-            return {
-                "status": "success",
-                "message": f"Connected as {user_info.get('displayName', 'Unknown User')}."
-            }
+            results = response.json().get("results", [])
+            return [
+                {
+                    "title": result.get("title"),
+                    "url": f"{BASE_URL}{result.get('_links', {}).get('webui')}"
+                }
+                for result in results
+            ]
         else:
-            return {
-                "status": "failure",
-                "message": f"Connection failed: {response.status_code} {response.text}"
-            }
-    except Exception as e:
-        return {
-            "status": "failure",
-            "message": f"Connection failed: {str(e)}"
-        }
-
-# === Tool: List all Confluence spaces ===
-@mcp.tool()
-def list_spaces() -> list:
-    """
-    List all Confluence spaces.
-    """
-    try:
-        spaces = confluence.get_all_spaces()
-        return [{"key": s["key"], "name": s["name"]} for s in spaces.get("results", [])]
+            return [{"error": f"Search failed: {response.status_code} {response.text}"}]
     except Exception as e:
         return [{"error": str(e)}]
-
-# === Tool: Retrieve a specific page by space key and title ===
-@mcp.tool()
-def get_page(input: PageInput) -> dict:
-    """
-    Retrieve a Confluence page by space key and title.
-    """
-    try:
-        page = confluence.get_page_by_title(space=input.space_key, title=input.page_title)
-        if page:
-            return {
-                "id": page["id"],
-                "title": page["title"],
-                "url": f"{BASE_URL}/pages/viewpage.action?pageId={page['id']}"
-            }
-        else:
-            return {"error": "Page not found."}
-    except Exception as e:
-        return {"error": str(e)}
 
 # === Resource: Expose Confluence content ===
 @mcp.resource()
@@ -99,8 +65,10 @@ def confluence_resource(uri: str) -> dict:
         if len(parts) != 2:
             return {"error": "Invalid URI format. Expected confluence://<space_key>/<page_title>"}
         space_key, page_title = parts
+        # Fetch the page by title
         page = confluence.get_page_by_title(space=space_key, title=page_title)
         if page:
+            # Retrieve the page content
             content = confluence.get_page_by_id(page_id=page["id"], expand="body.storage")
             return {
                 "id": page["id"],
@@ -113,15 +81,6 @@ def confluence_resource(uri: str) -> dict:
     except Exception as e:
         return {"error": str(e)}
 
-# === Run the MCP server with startup connection test on port 8000 ===
+# === Run the MCP server ===
 if __name__ == "__main__":
-    # Perform connection test before starting the server
-    result = test_confluence_connection()
-    if result["status"] == "success":
-        print(f"✅ {result['message']}")
-        mcp.run(transport="streamable-http", host="0.0.0.0", port=8000, path="/mcp")
-    else:
-        print(f"❌ {result['message']}")
-        # Optionally, exit the program if the connection fails
-        # import sys
-        # sys.exit(1)
+    mcp.run()
