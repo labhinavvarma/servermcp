@@ -2,62 +2,69 @@ import streamlit as st
 import asyncio
 import nest_asyncio
 import json
-
-from mcp.client.sse import sse_client
+import aiohttp
 from mcp import ClientSession
-from mcp.client.client import ToolResult
-from mcp.client.multi import MultiServerMCPClient
+from mcp.client.sse import sse_client
 
 nest_asyncio.apply()
-st.set_page_config(page_title="MCP Tool Client", page_icon="🛠️")
-st.title("🛠️ MCP Tool Client: Calculator + Analyzer")
+st.set_page_config(page_title="MCP Analyzer", page_icon="📊")
 
-# === MCP Server URL ===
-server_url = st.sidebar.text_input("MCP Server URL", "http://localhost:8000/sse")
-mode = st.sidebar.radio("Select Mode", ["Calculator", "JSON Analyzer"], horizontal=True)
+st.title("📊 JSON Analyzer via MCP")
 
-# === Core Tool Call Function ===
-async def call_mcp_tool(tool_name: str, arguments: dict):
-    async with MultiServerMCPClient(
-        {"MCPServer": {"url": server_url, "transport": "sse"}}
-    ) as client:
-        result: ToolResult = await client.call_tool("MCPServer", tool_name, arguments)
-        return result.content[0].json()
+# MCP Server Configuration
+server_url = st.sidebar.text_input("MCP Server URL", "http://<YOUR-EC2-IP>:8000/sse")
 
-# === Calculator UI ===
-if mode == "Calculator":
-    st.subheader("🔢 Calculator Tool")
-    expr = st.text_input("Enter Expression (e.g., 3+4*2):")
-    if st.button("Evaluate"):
-        try:
-            output = asyncio.run(call_mcp_tool("calculator", {"expression": expr}))
-            st.success("✅ Result")
-            st.code(str(output))
-        except Exception as e:
-            st.error(f"❌ Error: {e}")
+# Display connection status
+async def check_mcp_connection():
+    try:
+        async with sse_client(url=server_url) as sse_conn:
+            async with ClientSession(*sse_conn) as session:
+                await session.initialize()
+                return True
+    except Exception as e:
+        st.sidebar.error(f"Connection failed: {e}")
+        return False
 
-# === JSON Analyzer UI ===
-elif mode == "JSON Analyzer":
-    st.subheader("📊 Analyze JSON Data")
-    uploaded_file = st.file_uploader("Upload JSON File", type=["json"])
-    operation = st.selectbox("Select Operation", ["sum", "mean", "median", "min", "max", "average"])
+# Async function to call analyze tool
+async def analyze_json(json_data, operation):
+    try:
+        async with sse_client(url=server_url) as sse_conn:
+            async with ClientSession(*sse_conn) as session:
+                await session.initialize()
+                result = await session.call_tool("analyze", {
+                    "data": json_data,
+                    "operation": operation
+                })
+                return result
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
-    if uploaded_file:
-        try:
-            json_data = json.load(uploaded_file)
-            st.code(json.dumps(json_data, indent=2), language="json")
-            if st.button("Run Analysis"):
-                try:
-                    output = asyncio.run(call_mcp_tool("analyze", {
-                        "data": json_data,
-                        "operation": operation
-                    }))
-                    st.success("✅ Analysis Output")
-                    st.code(json.dumps(output, indent=2))
-                except Exception as e:
-                    st.error(f"❌ MCP Tool Error: {e}")
-        except Exception as e:
-            st.error(f"❌ Invalid JSON: {e}")
+# Sidebar - Choose Operation
+operation = st.sidebar.selectbox("Select Operation", ["sum", "mean", "median", "min", "max"])
 
-st.sidebar.markdown("---")
-st.sidebar.caption("📡 MCP Client (No LangGraph)")
+# File uploader
+uploaded_file = st.file_uploader("Upload a JSON file", type="json")
+
+# Parse and analyze JSON
+if uploaded_file:
+    try:
+        json_content = json.load(uploaded_file)
+        st.json(json_content)
+
+        if st.button("Analyze"):
+            with st.spinner("Analyzing..."):
+                result = asyncio.run(analyze_json(json_content, operation))
+            if result["status"] == "success":
+                st.success(f"✅ Result: {result['result']}")
+            else:
+                st.error(f"❌ Error: {result.get('error', 'Unknown error')}")
+
+    except Exception as e:
+        st.error(f"Invalid JSON: {e}")
+
+# Show connection status
+if st.sidebar.button("Check MCP Connection"):
+    if asyncio.run(check_mcp_connection()):
+        st.sidebar.success("✅ MCP Server is reachable")
+    else:
+        st.sidebar.error("❌ MCP Server not reachable")
