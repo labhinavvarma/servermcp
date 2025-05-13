@@ -1,94 +1,118 @@
 import streamlit as st
 import asyncio
-import json
 import nest_asyncio
+import json
+import yaml
 
-from mcp import ClientSession
 from mcp.client.sse import sse_client
+from mcp import ClientSession
 
-# Required for nested async loop in Streamlit
+# Page config
+st.set_page_config(page_title="Healthcare AI Chat", page_icon="🏥")
+st.title("Healthcare AI Chat")
+
 nest_asyncio.apply()
 
-# UI Config
-st.set_page_config(page_title="HEDIS MCP Client", page_icon="🩺")
-st.title("🩺 HEDIS MCP Client")
+# --- Sidebar Configuration ---
+server_url = st.sidebar.text_input("MCP Server URL", "http://10.126.192.183:8000/sse")
+show_server_info = st.sidebar.checkbox("🛡 Show MCP Server Info", value=False)
 
-server_url = st.sidebar.text_input("MCP Server URL", "http://10.126.192.183:8001/sse")
+# --- Show Server Information ---
+if show_server_info:
+    async def fetch_mcp_info():
+        result = {"resources": [], "tools": [], "prompts": [], "yaml": [], "search": []}
+        try:
+            async with sse_client(url=server_url) as sse_connection:
+                async with ClientSession(*sse_connection) as session:
+                    await session.initialize()
 
-# Cache the session once established
-@st.cache_resource
-def get_event_loop():
-    return asyncio.new_event_loop()
+                    # --- Resources ---
+                    resources = await session.list_resources()
+                    if hasattr(resources, 'resources'):
+                        for r in resources.resources:
+                            result["resources"].append({"name": r.name, "description": r.description})
 
-async def get_session():
-    async with sse_client(url=server_url) as sse_connection:
-        session = ClientSession(*sse_connection)
-        await session.initialize()
-        return session
+                    # --- Tools ---
+                    tools = await session.list_tools()
+                    hidden_tools = {"add-frequent-questions", "add-prompts", "suggested_top_prompts"}
+                    if hasattr(tools, 'tools'):
+                        for t in tools.tools:
+                            if t.name not in hidden_tools:
+                                result["tools"].append({
+                                    "name": t.name,
+                                    "description": getattr(t, 'description', 'No description')
+                                })
 
-async def list_prompts(session):
-    prompts = await session.list_prompts()
-    return [p.name for p in prompts]
+                    # --- Prompts ---
+                    prompts = await session.list_prompts()
+                    if hasattr(prompts, 'prompts'):
+                        for p in prompts.prompts:
+                            args = []
+                            if hasattr(p, 'arguments'):
+                                for arg in p.arguments:
+                                    args.append(f"{arg.name} ({'Required' if arg.required else 'Optional'}): {arg.description}")
+                            result["prompts"].append({
+                                "name": p.name,
+                                "description": getattr(p, 'description', ''),
+                                "args": args
+                            })
 
-async def read_prompt(session, uri):
-    content = await session.read_resource(uri)
-    return content
+                    # --- YAML Resources ---
+                    try:
+                        yaml_content = await session.read_resource("schematiclayer://cortex_analyst/schematic_models/hedis_stage_full/list")
+                        if hasattr(yaml_content, 'contents'):
+                            for item in yaml_content.contents:
+                                if hasattr(item, 'text'):
+                                    parsed = yaml.safe_load(item.text)
+                                    result["yaml"].append(yaml.dump(parsed, sort_keys=False))
+                    except Exception as e:
+                        result["yaml"].append(f"YAML error: {e}")
 
-async def call_add_prompt_tool(session, prompt_name, description, content):
-    return await session.call_tool(
-        name="add-prompts",
-        arguments={
-            "uri": f"genaiplatform://hedis/prompts/{prompt_name}",
-            "prompt": {
-                "prompt_name": prompt_name,
-                "description": description,
-                "content": content
-            }
-        }
-    )
+                    # --- Search Objects ---
+                    try:
+                        content = await session.read_resource("search://cortex_search/search_obj/list")
+                        if hasattr(content, 'contents'):
+                            for item in content.contents:
+                                if hasattr(item, 'text'):
+                                    objs = json.loads(item.text)
+                                    result["search"].extend(objs)
+                    except Exception as e:
+                        result["search"].append(f"Search error: {e}")
 
-async def get_prompt_response(session, prompt_name, query):
-    return await session.get_prompt(
-        name=prompt_name,
-        arguments={"query": query}
-    )
+        except Exception as e:
+            st.sidebar.error(f"❌ MCP Connection Error: {e}")
+        return result
 
-# Interface tabs
-tab1, tab2, tab3 = st.tabs(["➕ Add Prompt", "📖 View Prompt", "🧠 Run Prompt"])
+    mcp_data = asyncio.run(fetch_mcp_info())
 
-# Add prompt tab
-with tab1:
-    st.subheader("➕ Add a New Prompt")
-    prompt_name = st.text_input("Prompt Name")
-    description = st.text_area("Prompt Description")
-    content = st.text_area("Prompt Content")
+    # Display Resources
+    with st.sidebar.expander("📦 Resources", expanded=False):
+        for r in mcp_data["resources"]:
+            st.markdown(f"**{r['name']}**\n\n{r['description']}")
 
-    if st.button("Add Prompt"):
-        loop = get_event_loop()
-        session = loop.run_until_complete(get_session())
-        result = loop.run_until_complete(call_add_prompt_tool(session, prompt_name, description, content))
-        st.success("Prompt added successfully!")
-        st.json(result)
+    # Display Tools (Filtered)
+    with st.sidebar.expander("🛠 Tools", expanded=False):
+        for t in mcp_data["tools"]:
+            st.markdown(f"**{t['name']}**\n\n{t['description']}")
 
-# View prompt tab
-with tab2:
-    st.subheader("📖 View Prompt Content")
-    selected_prompt = st.text_input("Prompt Name to View", "example-prompt")
-    if st.button("Read Prompt"):
-        loop = get_event_loop()
-        session = loop.run_until_complete(get_session())
-        content = loop.run_until_complete(read_prompt(session, f"genaiplatform://hedis/prompts/{selected_prompt}"))
-        st.code(json.dumps(content, indent=2), language="json")
+    # Display Prompts
+    with st.sidebar.expander("🧐 Prompts", expanded=False):
+        for p in mcp_data["prompts"]:
+            st.markdown(f"**{p['name']}**\n\n{p['description']}")
+            if p["args"]:
+                st.markdown("Arguments:")
+                for a in p["args"]:
+                    st.markdown(f"- {a}")
 
-# Run prompt tab
-with tab3:
-    st.subheader("🧠 Run Prompt")
-    loop = get_event_loop()
-    session = loop.run_until_complete(get_session())
-    prompt_list = loop.run_until_complete(list_prompts(session))
-    selected = st.selectbox("Select Prompt", prompt_list)
-    query = st.text_area("Your Query", "What is the age criteria for BCS Measure?")
-    if st.button("Run"):
-        response = loop.run_until_complete(get_prompt_response(session, selected, query))
-        st.markdown("### Response")
-        st.code(json.dumps(response, indent=2), language="json")
+    # Display YAML
+    with st.sidebar.expander("📄 YAML", expanded=False):
+        for y in mcp_data["yaml"]:
+            st.code(y, language="yaml")
+
+    # Display Search Objects
+    with st.sidebar.expander("🔍 Search Objects", expanded=False):
+        for s in mcp_data["search"]:
+            st.json(s)
+
+else:
+    st.warning("Snowflake and LLM chatbot features are currently disabled. Enable them by checking 'Show MCP Server Info'.")
