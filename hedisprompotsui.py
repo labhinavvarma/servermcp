@@ -32,7 +32,7 @@ if show_server_info:
                         for r in resources.resources:
                             result["resources"].append({"name": r.name, "description": r.description})
 
-                    # --- Tools ---
+                    # --- Tools (filtered) ---
                     tools = await session.list_tools()
                     hidden_tools = {"add-frequent-questions", "add-prompts", "suggested_top_prompts"}
                     if hasattr(tools, 'tools'):
@@ -85,17 +85,34 @@ if show_server_info:
 
     mcp_data = asyncio.run(fetch_mcp_info())
 
-    # Display Resources
+    # --- Resources Section ---
     with st.sidebar.expander("📦 Resources", expanded=False):
         for r in mcp_data["resources"]:
             st.markdown(f"**{r['name']}**\n\n{r['description']}")
 
-    # Display Tools (Filtered)
+        st.markdown("---")
+        st.markdown("### ⚙️ Registered Tool Names (`@mcp.tool`)")
+
+        async def fetch_all_tools():
+            async with sse_client(url=server_url) as sse_connection:
+                async with ClientSession(*sse_connection) as session:
+                    await session.initialize()
+                    tools = await session.list_tools()
+                    return [tool.name for tool in tools.tools] if hasattr(tools, "tools") else []
+
+        try:
+            all_tools = asyncio.run(fetch_all_tools())
+            for tool_name in sorted(all_tools):
+                st.markdown(f"- `{tool_name}`")
+        except Exception as e:
+            st.error(f"⚠️ Could not fetch full tool list: {e}")
+
+    # --- Tools Section (Filtered) ---
     with st.sidebar.expander("🛠 Tools", expanded=False):
         for t in mcp_data["tools"]:
             st.markdown(f"**{t['name']}**\n\n{t['description']}")
 
-    # Display Prompts
+    # --- Prompts Section ---
     with st.sidebar.expander("🧐 Prompts", expanded=False):
         for p in mcp_data["prompts"]:
             st.markdown(f"**{p['name']}**\n\n{p['description']}")
@@ -104,12 +121,12 @@ if show_server_info:
                 for a in p["args"]:
                     st.markdown(f"- {a}")
 
-    # Display YAML
+    # --- YAML Section ---
     with st.sidebar.expander("📄 YAML", expanded=False):
         for y in mcp_data["yaml"]:
             st.code(y, language="yaml")
 
-    # Display Search Objects
+    # --- Search Section ---
     with st.sidebar.expander("🔍 Search Objects", expanded=False):
         for s in mcp_data["search"]:
             st.json(s)
