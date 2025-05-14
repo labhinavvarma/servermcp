@@ -1,70 +1,197 @@
+import streamlit as st
 import asyncio
-from mcp import ClientSession
+import nest_asyncio
+import json
+import yaml
+
 from mcp.client.sse import sse_client
-from mcp.client.stdio import stdio_client
-from mcp import StdioServerParameters
+from mcp import ClientSession
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.prebuilt import create_react_agent
+from dependencies import SnowFlakeConnector
+from llmobject_wrapper import ChatSnowflakeCortex
+from snowflake.snowpark import Session
 
+# Page config
+st.set_page_config(page_title="Healthcare AI Chat", page_icon="🏥")
+st.title("Healthcare AI Chat")
 
-# STDIO-based server launch (optional if you're not using subprocess MCP server)
-async def run_stdio():
-    server_params = StdioServerParameters(
-        command="python",
-        args=["mcpserver.py"],  # Ensure this path is correct
-        env=None
-    )
+nest_asyncio.apply()
 
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            resources = await session.list_resources()
-            print("Resources:", resources)
+# Sidebar server input
+server_url = st.sidebar.text_input("MCP Server URL", "http://10.126.192.183:8000/sse")
+show_server_info = st.sidebar.checkbox("🛡 Show MCP Server Info", value=False)
 
-            tools = await session.list_tools()
-            print("Tools:", tools)
+if show_server_info:
+    async def fetch_mcp_info():
+        result = {"resources": [], "tools": [], "prompts": [], "yaml": []}
+        try:
+            async with sse_client(url=server_url) as sse_connection:
+                async with ClientSession(*sse_connection) as session:
+                    await session.initialize()
 
+                    resources = await session.list_resources()
+                    for r in getattr(resources, 'resources', []):
+                        result["resources"].append({"name": r.name, "description": r.description})
 
-# MCP SSE client execution
-async def sse_run():
-    async with sse_client(url='http://10.126.192.183:8001/sse') as sse_connection:
-        async with ClientSession(*sse_connection) as session:
-            await session.initialize()
+                    tools = await session.list_tools()
+                    for t in getattr(tools, 'tools', []):
+                        result["tools"].append({"name": t.name, "description": getattr(t, 'description', '')})
 
-            print("\n✅ Connected and Initialized")
+                    prompts = await session.list_prompts()
+                    for p in getattr(prompts, 'prompts', []):
+                        args = []
+                        for arg in getattr(p, 'arguments', []):
+                            args.append(f"{arg.name} ({'Required' if arg.required else 'Optional'}): {arg.description}")
+                        result["prompts"].append({
+                            "name": p.name,
+                            "description": getattr(p, 'description', ''),
+                            "args": args
+                        })
 
-            # --- Call tool: add-prompts ---
-            tool_response = await session.call_tool(
-                name="add-prompts",
-                arguments={
-                    "uri": "genaiplatform://hedis/prompts/example-prompt",
-                    "prompt": {
-                        "prompt_name": "example-prompt",
-                        "description": "Prompts to test the adding new prompts",
-                        "content": "You are expert to answer HEDIS questions"
-                    }
-                }
-            )
-            print("\n📩 Tool Response (add-prompts):")
-            print(tool_response)
+                    try:
+                        yaml_content = await session.read_resource("schematiclayer://cortex_analyst/schematic_models/hedis_stage_full/list")
+                        for item in getattr(yaml_content, 'contents', []):
+                            if hasattr(item, 'text'):
+                                parsed = yaml.safe_load(item.text)
+                                result["yaml"].append(yaml.dump(parsed, sort_keys=False))
+                    except Exception as e:
+                        result["yaml"].append(f"YAML error: {e}")
 
-            # --- Read the prompt back ---
-            resource_content = await session.read_resource("genaiplatform://hedis/prompts/example-prompt")
-            print("\n📘 Resource Content:")
-            print(resource_content.text)
+        except Exception as e:
+            st.sidebar.error(f"❌ MCP Connection Error: {e}")
+        return result
 
-            # --- List prompts ---
-            prompts = await session.list_prompts()
-            print("\n📋 Prompt List:")
-            for p in prompts.prompts:
-                print(f"- {p.name}: {p.description}")
+    mcp_data = asyncio.run(fetch_mcp_info())
 
-            # --- Use the prompt with input ---
-            result = await session.get_prompt(
-                name="example-prompt",
-                arguments={"query": "What is the age criteria for CBP Measure?"}
-            )
-            print("\n💬 Prompt Completion Result:")
-            print(result.text)
+    with st.sidebar.expander("📦 Resources", expanded=False):
+        for r in mcp_data["resources"]:
+            st.markdown(f"**{r['name']}**\n\n{r['description']}")
 
+    with st.sidebar.expander("🛠 Tools", expanded=False):
+        for t in mcp_data["tools"]:
+            st.markdown(f"**{t['name']}**\n\n{t['description']}")
 
-if __name__ == "__main__":
-    asyncio.run(sse_run())
+    with st.sidebar.expander("🧐 Prompts", expanded=False):
+        for p in mcp_data["prompts"]:
+            st.markdown(f"**{p['name']}**\n\n{p['description']}")
+            if p["args"]:
+                st.markdown("Arguments:")
+                for a in p["args"]:
+                    st.markdown(f"- {a}")
+
+    with st.sidebar.expander("📄 YAML", expanded=False):
+        for y in mcp_data["yaml"]:
+            st.code(y, language="yaml")
+
+else:
+    # LLM + Snowflake setup
+    @st.cache_resource
+    def get_snowflake_connection():
+        return SnowFlakeConnector.get_conn('aedl', '')
+
+    @st.cache_resource
+    def get_model():
+        sf_conn = get_snowflake_connection()
+        return ChatSnowflakeCortex(
+            model="llama3.1-70b-elevance",
+            cortex_function="complete",
+            session=Session.builder.configs({"connection": sf_conn}).getOrCreate()
+        )
+
+    # Select prompt type
+    prompt_type = st.sidebar.radio("Select Prompt Type", ["Calculator", "HEDIS Expert", "Weather", "No Context"])
+    prompt_map = {
+        "Calculator": "calculator-prompt",
+        "HEDIS Expert": "hedis-prompt",
+        "Weather": "weather-prompt",
+        "No Context": None
+    }
+
+    examples = {
+        "Calculator": ["(4+5)/2.0", "sqrt(16) + 7", "3^4 - 12"],
+        "HEDIS Expert": [],
+        "Weather": [
+            "What is the present weather in Richmond?",
+            "What's the weather forecast for Atlanta?",
+            "Is it raining in New York City today?"
+        ],
+        "No Context": ["Who won the world cup in 2022?", "Summarize climate change impact on oceans"]
+    }
+
+    # Load HEDIS examples from MCP
+    if prompt_type == "HEDIS Expert":
+        try:
+            async def fetch_hedis_examples():
+                async with sse_client(url=server_url) as sse_connection:
+                    async with ClientSession(*sse_connection) as session:
+                        await session.initialize()
+                        content = await session.read_resource("genaiplatform://hedis/frequent_questions/Initialization")
+                        if hasattr(content, "contents"):
+                            return [json.loads(item.text)["prompt"] for item in content.contents if hasattr(item, "text")]
+                return []
+            examples["HEDIS Expert"] = asyncio.run(fetch_hedis_examples())
+        except Exception as e:
+            examples["HEDIS Expert"] = [f"⚠️ Failed to load examples: {e}"]
+
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    with st.sidebar.expander("Example Queries", expanded=True):
+        for example in examples[prompt_type]:
+            if st.button(example, key=example):
+                st.session_state.query_input = example
+
+    query = st.chat_input("Type your query here...")
+    if "query_input" in st.session_state:
+        query = st.session_state.query_input
+        del st.session_state.query_input
+
+    async def process_query(query_text):
+        st.session_state.messages.append({"role": "user", "content": query_text})
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            message_placeholder.text("Processing...")
+            try:
+                model = get_model()
+
+                if prompt_type == "No Context":
+                    result = model.complete(query_text)
+                    message_placeholder.text(result)
+                    st.session_state.messages.append({"role": "assistant", "content": result})
+                    return
+
+                async with MultiServerMCPClient(
+                    {"DataFlyWheelServer": {"url": server_url, "transport": "sse"}}
+                ) as client:
+                    agent = create_react_agent(model=model, tools=client.get_tools())
+                    prompt_name = prompt_map[prompt_type]
+                    prompt_from_server = await client.get_prompt(
+                        server_name="DataFlyWheelServer",
+                        prompt_name=prompt_name,
+                        arguments={"query": query_text}
+                    )
+                    content_template = prompt_from_server[0].content
+                    formatted_prompt = content_template.format(query=query_text) if "{query}" in content_template else content_template + "\n" + query_text
+                    response = await agent.ainvoke({"messages": formatted_prompt})
+                    result = list(response.values())[0][1].content
+                    message_placeholder.text(result)
+                    st.session_state.messages.append({"role": "assistant", "content": result})
+            except Exception as e:
+                error_message = f"Error: {str(e)}"
+                message_placeholder.text(error_message)
+                st.session_state.messages.append({"role": "assistant", "content": error_message})
+
+    if query:
+        asyncio.run(process_query(query))
+
+    if st.sidebar.button("Clear Chat"):
+        st.session_state.messages = []
+        st.experimental_rerun()
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("Healthcare AI Chat v1.0")
