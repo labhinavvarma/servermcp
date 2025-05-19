@@ -141,7 +141,11 @@ def process_query(query_text):
                                 if p.name == prompt_name:
                                     for arg in p.arguments:
                                         if arg.required:
-                                            required_args[arg.name] = st.sidebar.text_input(f"{arg.name} ({arg.description})", key=arg.name)
+                                            # Use default keys for tool types
+                                            if prompt_type == "Calculator" and arg.name == "expression":
+                                                required_args[arg.name] = query_text
+                                            else:
+                                                required_args[arg.name] = st.sidebar.text_input(f"{arg.name} ({arg.description})", key=arg.name)
 
                             # If Calculator, call tool directly
                             if prompt_type == "Calculator":
