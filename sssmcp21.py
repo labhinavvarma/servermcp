@@ -132,12 +132,10 @@ def process_query(query_text):
             prompt_template = ""
 
             if prompt_name:
-                async def get_prompt_content():
+                async def handle_prompt_or_tool():
                     async with sse_client(url=server_url) as sse_connection:
                         async with ClientSession(*sse_connection) as session:
                             await session.initialize()
-
-                            # Fetch the list of prompts and their required arguments
                             all_prompts = await session.list_prompts()
                             for p in all_prompts.prompts:
                                 if p.name == prompt_name:
@@ -145,17 +143,27 @@ def process_query(query_text):
                                         if arg.required:
                                             required_args[arg.name] = st.sidebar.text_input(f"{arg.name} ({arg.description})", key=arg.name)
 
-                            # Get the actual prompt template now with user-supplied args
+                            # If Calculator, call tool directly
+                            if prompt_type == "Calculator":
+                                tool_response = await session.call_tool("calculator", required_args)
+                                return tool_response.content[0].text
+
+                            # Otherwise, fetch prompt and return formatted
                             prompt = await session.get_prompt(prompt_name=prompt_name, arguments=required_args)
-                            return prompt[0].content if prompt else ""
+                            return prompt[0].content.format(query=query_text) if "{query}" in prompt[0].content else prompt[0].content + query_text
 
-                prompt_template = asyncio.run(get_prompt_content())
+                result_or_prompt = asyncio.run(handle_prompt_or_tool())
 
-            formatted_prompt = prompt_template.format(query=query_text) if "{query}" in prompt_template else prompt_template + query_text
-            result = call_cortex_llm(formatted_prompt, st.session_state.context_window)
-            message_placeholder.text(result)
-            st.session_state.context_window.append(f"User: {query_text}\nBot: {result}")
-            st.session_state.messages.append({"role": "assistant", "content": result})
+                if prompt_type == "Calculator":
+                    final_response = result_or_prompt  # already tool result
+                else:
+                    final_response = call_cortex_llm(result_or_prompt, st.session_state.context_window)
+            else:
+                final_response = call_cortex_llm(query_text, st.session_state.context_window)
+
+            message_placeholder.text(final_response)
+            st.session_state.context_window.append(f"User: {query_text}\nBot: {final_response}")
+            st.session_state.messages.append({"role": "assistant", "content": final_response})
 
         except Exception as e:
             error_message = f"Error: {str(e)}"
