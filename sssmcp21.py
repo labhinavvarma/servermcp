@@ -129,23 +129,27 @@ def process_query(query_text):
         try:
             prompt_name = prompt_map[prompt_type]
             required_args = {}
+            prompt_template = ""
+
             if prompt_name:
                 async def get_prompt_content():
                     async with sse_client(url=server_url) as sse_connection:
                         async with ClientSession(*sse_connection) as session:
                             await session.initialize()
-                            prompt_metadata = await session.list_prompts()
-                            for p in prompt_metadata.prompts:
+
+                            # Fetch the list of prompts and their required arguments
+                            all_prompts = await session.list_prompts()
+                            for p in all_prompts.prompts:
                                 if p.name == prompt_name:
                                     for arg in p.arguments:
                                         if arg.required:
-                                            user_val = st.sidebar.text_input(f"{arg.name} ({arg.description})", key=arg.name)
-                                            required_args[arg.name] = user_val
+                                            required_args[arg.name] = st.sidebar.text_input(f"{arg.name} ({arg.description})", key=arg.name)
+
+                            # Get the actual prompt template now with user-supplied args
                             prompt = await session.get_prompt(prompt_name=prompt_name, arguments=required_args)
                             return prompt[0].content if prompt else ""
+
                 prompt_template = asyncio.run(get_prompt_content())
-            else:
-                prompt_template = ""
 
             formatted_prompt = prompt_template.format(query=query_text) if "{query}" in prompt_template else prompt_template + query_text
             result = call_cortex_llm(formatted_prompt, st.session_state.context_window)
