@@ -1,36 +1,32 @@
-from fastapi import FastAPI, APIRouter, HTTPException
-from mcp import ClientSession
+from fastapi import FastAPI, APIRouter
+import asyncio
 from mcp.client.sse import sse_client
+from mcp import ClientSession
 
-# Define the router
+# Initialize FastAPI app and router
+app = FastAPI(title="MCP Client Connector")
 router = APIRouter()
 
-@router.get("/mcp/connect", summary="Connect to MCP SSE server and create session")
-async def connect_mcp_sse():
-    """
-    Connects to the MCP SSE server and initializes a client session.
-    """
-    server_url = "http://10.126.192.183:8001/sse"
+# ✅ Replace with your EC2 MCP server's public IP and port
+EC2_MCP_SERVER_URL = "http://<YOUR_EC2_PUBLIC_IP>:8001/sse"  # Example: http://3.110.45.78:8001/sse
 
+@router.get("/connect-mcp")
+async def connect_to_mcp():
+    """
+    Establish a client session with the MCP server running on EC2 via SSE.
+    """
     try:
-        async with sse_client(url=server_url) as sse_connection:
-            print("✅ SSE connection established")
-
+        async with sse_client(url=EC2_MCP_SERVER_URL) as sse_connection:
             async with ClientSession(*sse_connection) as session:
-                print("✅ MCP ClientSession started")
-                return {
-                    "status": "✅ MCP SSE connection and session established",
-                    "server": server_url
-                }
-
+                # Optionally log or perform actions with the session
+                return {"status": "✓ Connected to MCP on EC2"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"❌ MCP connection failed: {str(e)}")
+        return {"error": str(e)}
 
-# Set up FastAPI app and include router
-app = FastAPI(title="MCP SSE Connector")
+# Mount the router to the app
 app.include_router(router)
 
+# Run this app manually (e.g., python app.py)
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
-
+    uvicorn.run(app, host="0.0.0.0", port=8080)
